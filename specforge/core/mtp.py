@@ -48,11 +48,13 @@ class OnlineMTPModel(nn.Module):
         token after that (x_{t+2}) using the target's post-norm hidden state at
         position t.  We therefore train with:
           - draft input: input_ids[:, 1:]  (x_1..x_T, padded)
-          - label:       input_ids[:, 2:]  (x_2..x_T)
+          - label:       x_2..x_T followed by a pad (length matches logits)
         """
         shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 2:].contiguous()
-        shift_mask = loss_mask[:, 2:].contiguous()
+        # x_2..x_T has length seq_len-2; pad one position so its length equals
+        # seq_len-1 (same as shift_logits). The padded position is ignored.
+        shift_labels = F.pad(input_ids[:, 2:], (0, 1), value=-100).contiguous()
+        shift_mask = F.pad(loss_mask[:, 2:], (0, 1), value=0).contiguous()
         return shift_logits, shift_labels, shift_mask
 
     def forward(
