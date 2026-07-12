@@ -41,4 +41,4 @@ torchrun \
     --trust-remote-code \
     --embedding-key model.language_model.embed_tokens.weight \
     --lm-head-key model.language_model.embed_tokens.weight \
-    "$@"
+    "${@:3}"
