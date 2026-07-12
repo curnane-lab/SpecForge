@@ -168,18 +168,26 @@ class HFEagle3TargetModel(Eagle3TargetModel):
                 "tp_size": tp_size,
                 "device_mesh": get_tp_device_mesh(),
             }
+            target_model = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                cache_dir=cache_dir,
+                **device_kwargs,
+                **kwargs,
+            )
         else:
-            device_kwargs = {
-                "device_map": device,
-            }
-
-        target_model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path,
-            torch_dtype=torch_dtype,
-            cache_dir=cache_dir,
-            **device_kwargs,
-            **kwargs,
-        )
+            # Load to CPU first, then move to device. On NPU, device_map=device
+            # can cause OOM because the allocator pre-reserves the full model
+            # size, leaving no room for intermediate activations.
+            target_model = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                cache_dir=cache_dir,
+                low_cpu_mem_usage=True,
+                **kwargs,
+            )
+            if device:
+                target_model = target_model.to(device)
         return cls(target_model)
 
     def _get_transformer_layers(self):
@@ -550,6 +558,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         return_last_hidden_states: bool = False,
         return_logits: bool = True,
         shard_returns: bool = False,
+        capture_aux_hidden_states: bool = True,
     ):
         sampling_params = SamplingParams(temperature=0, max_new_tokens=1, top_k=1)
         reqs, data_cache = [], []
@@ -587,7 +596,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
 
         logits_list, aux_hidden_states_list, last_hidden_states_list = self._extend(
             reqs,
-            capture_aux_hidden_states=True,
+            capture_aux_hidden_states=capture_aux_hidden_states,
             return_last_hidden_states=return_last_hidden_states,
             return_logits=return_logits,
             shard_returns=shard_returns,
