@@ -169,12 +169,8 @@ class HFEagle3TargetModel(Eagle3TargetModel):
                 "device_mesh": get_tp_device_mesh(),
             }
         else:
-            # Load on CPU first, then move to the target device. This mirrors the
-            # DFlash HF backend and avoids transformers' device_map / allocator
-            # warmup path on NPU, which can run out of memory when the NPU
-            # allocator pool is small even though total device memory is large.
             device_kwargs = {
-                "low_cpu_mem_usage": True,
+                "device_map": device,
             }
 
         target_model = AutoModelForCausalLM.from_pretrained(
@@ -184,10 +180,6 @@ class HFEagle3TargetModel(Eagle3TargetModel):
             **device_kwargs,
             **kwargs,
         )
-
-        if tp_size == 1 and device:
-            target_model = target_model.to(device)
-
         return cls(target_model)
 
     def _get_transformer_layers(self):
@@ -556,7 +548,6 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         attention_mask: torch.Tensor,
         loss_mask: torch.Tensor,
         return_last_hidden_states: bool = False,
-        capture_aux_hidden_states: bool = True,
         return_logits: bool = True,
         shard_returns: bool = False,
     ):
@@ -596,7 +587,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
 
         logits_list, aux_hidden_states_list, last_hidden_states_list = self._extend(
             reqs,
-            capture_aux_hidden_states=capture_aux_hidden_states,
+            capture_aux_hidden_states=True,
             return_last_hidden_states=return_last_hidden_states,
             return_logits=return_logits,
             shard_returns=shard_returns,
