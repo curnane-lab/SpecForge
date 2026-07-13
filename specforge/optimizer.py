@@ -15,25 +15,50 @@ class BF16Optimizer:
 
     def __init__(
         self,
-        model,
-        lr,
+        model=None,
+        lr=None,
         weight_decay=0.0,
         max_grad_norm=0.5,
         total_steps=800_000,
         warmup_ratio=0.015,
+        param_groups=None,
     ):
-        # defaults copied from EAGLE traineagle3 ds_config.json
-        self.model = model
-        self.model_params = [p for p in model.parameters() if p.requires_grad]
+        # TODO: For now, we only support cosine annealing warmup lr scheduler and AdamW optimizer
+        # TODO: We should make these parameters configurable
+        #   These magic numbers: weight_decay=0.0, max_grad_norm=0.5, total_steps=800k, warmup_steps=12k are copied from
+        #   https://github.com/SafeAILab/EAGLE/blob/main/eagle/traineagle3/ds_config.json
+        if param_groups is not None:
+            self.model = None
+            self.model_params = []
+            fp32_param_groups = []
+            for group in param_groups:
+                params = [p for p in group["params"] if p.requires_grad]
+                self.model_params.extend(params)
+                fp32_params = [p.detach().clone().to(torch.float32) for p in params]
+                for mp in fp32_params:
+                    mp.requires_grad = True
+                fp32_group = {k: v for k, v in group.items() if k != "params"}
+                fp32_group["params"] = fp32_params
+                fp32_param_groups.append(fp32_group)
+            self.optimizer = torch.optim.AdamW(fp32_param_groups)
+        else:
+            if model is None or lr is None:
+                raise ValueError(
+                    "BF16Optimizer requires either a model and lr, or param_groups"
+                )
+            self.model = model
+            self.model_params = [p for p in model.parameters() if p.requires_grad]
+            self.fp32_params = [
+                p.detach().clone().to(torch.float32) for p in self.model_params
+            ]
+            for mp in self.fp32_params:
+                mp.requires_grad = True
+            self.optimizer = torch.optim.AdamW(
+                self.fp32_params, lr=lr, weight_decay=weight_decay
+            )
+            fp32_param_groups = self.optimizer.param_groups
         self.max_grad_norm = max_grad_norm
-        self.fp32_params = [
-            p.detach().clone().to(torch.float32) for p in self.model_params
-        ]
-        for mp in self.fp32_params:
-            mp.requires_grad = True
-        self.optimizer = torch.optim.AdamW(
-            self.fp32_params, lr=lr, weight_decay=weight_decay
-        )
+        self.fp32_params = [p for group in fp32_param_groups for p in group["params"]]
         self.last_grad_norm = None
         self._grad_norm_process_group = None
         self._reduce_grad_norm_across_ranks = True

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
+from . import compressor as compressor_module
 from .base import TargetEngine
 
 # NOTE (Phase B2): this module no longer imports sglang internals. The
@@ -55,8 +56,21 @@ class DFlashTargetEngine(TargetEngine):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: torch.Tensor,
+        use_compression: bool = False,
+        requires_grad: bool = False,
     ) -> DFlashTargetOutput:
-        """Generate context hidden states for DFlash training."""
+        """Generate context hidden states for DFlash training.
+
+        Args:
+            input_ids: Token IDs of shape ``[B, T]``.
+            attention_mask: Attention mask of shape ``[B, T]``.
+            loss_mask: Loss mask of shape ``[B, T]``.
+            use_compression: If ``True`` and a compressor is attached, run the
+                target model on compressed embeddings (sequence length ``T//r``).
+            requires_grad: If ``False`` (default), the forward pass is performed
+                under ``torch.no_grad()`` for efficiency. Set ``True`` when
+                training the compressor and gradients are required.
+        """
 
     def capture(
         self,
@@ -129,7 +143,14 @@ class SGLangDFlashTargetEngine(DFlashTargetEngine):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: torch.Tensor,
+        use_compression: bool = False,
+        requires_grad: bool = False,
     ) -> DFlashTargetOutput:
+        # SGLang backend does not support compressor injection yet.
+        if use_compression:
+            raise NotImplementedError(
+                "use_compression=True is not supported for SGLangDFlashTargetEngine"
+            )
         data_cache, hidden_states_list = self._backend.extend_dflash(
             input_ids, attention_mask, loss_mask
         )
@@ -152,9 +173,10 @@ class HFDFlashTargetEngine(DFlashTargetEngine):
 
     backend = "hf"
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, compressor: Optional[nn.Module] = None):
         super().__init__()
         self.model = model
+        self.compressor = compressor
 
     @classmethod
     def from_pretrained(
@@ -181,36 +203,76 @@ class HFDFlashTargetEngine(DFlashTargetEngine):
 
         return cls(target_model)
 
-    @torch.no_grad()
     def generate_dflash_data(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: torch.Tensor,
+        use_compression: bool = False,
+        requires_grad: bool = False,
     ) -> DFlashTargetOutput:
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            use_cache=False,
-        )
+        with torch.set_grad_enabled(requires_grad):
+            if use_compression and self.compressor is not None:
+                # Compress the prefix embeddings and run the target model on the
+                # shorter sequence.  The returned hidden states therefore have
+                # length ``T // compress_ratio`` and must be handled accordingly
+                # by the caller.
+                embeds = self._get_input_embeddings(input_ids)
+                compressed_embeds = self.compressor(embeds)
+                compressed_attention_mask = self._compress_mask(attention_mask)
+                compressed_loss_mask = self._compress_mask(loss_mask)
 
+                outputs = self.model(
+                    inputs_embeds=compressed_embeds,
+                    attention_mask=compressed_attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                )
+                hidden_states = self._select_hidden_states(outputs.hidden_states)
+
+                return DFlashTargetOutput(
+                    hidden_states=hidden_states,
+                    input_ids=input_ids,
+                    attention_mask=compressed_attention_mask,
+                    loss_mask=compressed_loss_mask,
+                )
+
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+            hidden_states = self._select_hidden_states(outputs.hidden_states)
+
+            return DFlashTargetOutput(
+                hidden_states=hidden_states,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                loss_mask=loss_mask,
+            )
+
+    def _get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Fetch token embeddings in an architecture-agnostic way."""
+        if hasattr(self.model, "get_input_embeddings"):
+            return self.model.get_input_embeddings()(input_ids)
+        # Common fallback for CausalLM wrappers.
+        return self.model.model.embed_tokens(input_ids)
+
+    def _compress_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Compress a mask to match the compressor output length."""
+        return compressor_module.compress_mask(mask, self.compressor.compress_ratio)
+
+    def _select_hidden_states(self, hidden_states: tuple[torch.Tensor]) -> torch.Tensor:
+        """Select captured layer hidden states or fall back to the last layer."""
         # hidden_states[0] = embedding output; hidden_states[i+1] = layer i output
         offset = 1
-        selected = []
         if self.capture_layer_ids is not None:
+            selected = []
             for idx in self.capture_layer_ids:
-                selected.append(outputs.hidden_states[idx + offset])
-            hidden_states = torch.cat(selected, dim=-1)
-        else:
-            hidden_states = outputs.hidden_states[-1]
-
-        return DFlashTargetOutput(
-            hidden_states=hidden_states,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            loss_mask=loss_mask,
-        )
+                selected.append(hidden_states[idx + offset])
+            return torch.cat(selected, dim=-1)
+        return hidden_states[-1]
 
 
 def get_dflash_target_model(

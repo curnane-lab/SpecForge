@@ -33,6 +33,10 @@ from specforge.inference.target_engine.dflash_target_model import (
     get_dflash_target_model,
 )
 from specforge.modeling.draft.dflash import DFlashDraftModel
+from specforge.modeling.target.compressor import (
+    HiddenStatePreservationLoss,
+    get_compressor,
+)
 from specforge.modeling.target.target_utils import TargetEmbeddingsAndHead
 from specforge.optimizer import BF16Optimizer
 from specforge.tracker import create_tracker
@@ -152,6 +156,55 @@ def _add_dspark_method_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_compressor_args(parser: argparse.ArgumentParser) -> None:
+    """Target prefix compression args for DFlash training."""
+    compressor_group = parser.add_argument_group("target prefix compression")
+    compressor_group.add_argument(
+        "--use-compressor", action="store_true", help="Enable target prefix compression"
+    )
+    compressor_group.add_argument(
+        "--compressor-type",
+        type=str,
+        default=None,
+        choices=["linear", "mlp", "early_semantic"],
+        help="Compressor architecture. Default reads from draft config.",
+    )
+    compressor_group.add_argument(
+        "--compress-ratio", type=int, default=2, help="Sequence compression ratio"
+    )
+    compressor_group.add_argument(
+        "--compressor-early-layers",
+        type=int,
+        default=0,
+        help="Number of early semantic layers for early_semantic compressor",
+    )
+    compressor_group.add_argument(
+        "--compressor-loss-type",
+        type=str,
+        default="mse",
+        choices=["mse", "cosine", "contrastive"],
+        help="Hidden-state preservation loss type",
+    )
+    compressor_group.add_argument(
+        "--compressor-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the hidden-state preservation loss",
+    )
+    compressor_group.add_argument(
+        "--compressor-learning-rate",
+        type=float,
+        default=None,
+        help="Compressor learning rate. Defaults to --learning-rate.",
+    )
+    compressor_group.add_argument(
+        "--compressor-checkpoint-path",
+        type=str,
+        default=None,
+        help="Optional path to a pretrained compressor checkpoint",
+    )
+
+
 def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
     dataset_group = parser.add_argument_group("dataset")
     dataset_group.add_argument("--train-data-path", type=str, required=True)
@@ -218,6 +271,7 @@ def _build_parser(
 
     if method == "dflash":
         _add_dflash_loss_args(parser)
+        _add_compressor_args(parser)
     elif method == "dspark_disagg":
         _add_dspark_method_args(parser)
     else:
@@ -299,6 +353,56 @@ def build_models(args) -> Tuple[DFlashTargetModel, DFlashDraftModel]:
 
     target_model.set_capture_layers(draft_model.target_layer_ids)
 
+    if args.use_compressor and args.target_model_backend != "hf":
+        raise ValueError(
+            "Target prefix compression is currently only supported with "
+            "--target-model-backend hf"
+        )
+
+    if args.use_compressor:
+        # Merge CLI args into the draft config so the compressor factory can
+        # read them consistently. CLI values take precedence over config values.
+        draft_config.dflash_config["compressor_type"] = (
+            args.compressor_type
+            or draft_config.dflash_config.get("compressor_type")
+            or "mlp"
+        )
+        draft_config.dflash_config["compress_ratio"] = (
+            args.compress_ratio
+            if args.compress_ratio is not None
+            else draft_config.dflash_config.get("compress_ratio", 2)
+        )
+        draft_config.dflash_config["compressor_early_layers"] = (
+            args.compressor_early_layers
+            if args.compressor_early_layers is not None
+            else draft_config.dflash_config.get("compressor_early_layers", 0)
+        )
+        compressor = get_compressor(
+            draft_config,
+            compressor_type=args.compressor_type,
+            target_model=target_model.model,
+        )
+        compressor = compressor.to(device=device, dtype=torch.bfloat16)
+        if args.compressor_checkpoint_path is not None:
+            ckpt = torch.load(
+                args.compressor_checkpoint_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            state_dict = ckpt.get("state_dict", ckpt)
+            compressor.load_state_dict(state_dict, strict=False)
+            print_on_rank0(
+                f"Loaded compressor checkpoint from {args.compressor_checkpoint_path}"
+            )
+        target_model.compressor = compressor
+        print_on_rank0(
+            f"Attached {compressor.__class__.__name__} to target model "
+            f"(compress_ratio={args.compress_ratio})"
+        )
+        print_on_rank0(
+            f"Compressor parameters: {sum(p.numel() for p in compressor.parameters()):,}"
+        )
+
     print_on_rank0(
         f"Draft config: block_size={draft_config.block_size}, "
         f"num_hidden_layers={draft_config.num_hidden_layers}, "
@@ -373,7 +477,9 @@ def build_dataloader(args, tokenizer) -> Tuple[DataLoader, Optional[DataLoader]]
     return train_dataloader, eval_dataloader
 
 
-def save_checkpoint(args, epoch, step, dflash_model, draft_model, optimizer):
+def save_checkpoint(
+    args, epoch, step, dflash_model, draft_model, optimizer, compressor=None
+):
     """Save checkpoint."""
     save_dir = os.path.join(args.output_dir, f"epoch_{epoch}_step_{step}")
     if dist.get_rank() == 0:
@@ -382,24 +488,32 @@ def save_checkpoint(args, epoch, step, dflash_model, draft_model, optimizer):
 
     with FSDP.state_dict_type(dflash_model, StateDictType.FULL_STATE_DICT):
         state_dict = dflash_model.state_dict()
+        # Keep only the draft model weights; the compressor (if attached to the
+        # draft model for FSDP/optimizer convenience) is saved separately below.
         draft_state_dict = {
             k.replace("draft_model.", ""): v
             for k, v in state_dict.items()
-            if "draft_model." in k
+            if "draft_model." in k and not k.startswith("draft_model.compressor.")
         }
 
         if dist.get_rank() == 0:
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "global_step": step,
-                    "args": args,
-                    **optimizer.state_dict(),
-                },
-                os.path.join(save_dir, "training_state.pt"),
-            )
+            training_state = {
+                "epoch": epoch,
+                "global_step": step,
+                "args": args,
+                **optimizer.state_dict(),
+            }
+            if compressor is not None:
+                training_state["compressor_state_dict"] = compressor.state_dict()
+            torch.save(training_state, os.path.join(save_dir, "training_state.pt"))
 
             draft_model.save_pretrained(save_dir, state_dict=draft_state_dict)
+
+            if compressor is not None:
+                torch.save(
+                    compressor.state_dict(),
+                    os.path.join(save_dir, "compressor.pt"),
+                )
 
             modeling_src = os.path.join(
                 os.path.dirname(__file__),
@@ -533,6 +647,20 @@ def main():
         trust_remote_code=args.trust_remote_code,
     )
 
+    compressor = getattr(target_model, "compressor", None)
+    compressor_lr = args.compressor_learning_rate or args.learning_rate
+    separate_compressor_lr = (
+        args.use_compressor and abs(compressor_lr - args.learning_rate) > 1e-12
+    )
+
+    if args.use_compressor and compressor is None:
+        raise RuntimeError("--use-compressor was set but no compressor is attached")
+
+    # Attach the compressor to the draft model so FSDP will shard its parameters
+    # together with the draft when the two modules share a learning rate.
+    if args.use_compressor and not separate_compressor_lr:
+        draft_model.compressor = compressor
+
     dflash_model = OnlineDFlashModel(
         draft_model=draft_model,
         target_lm_head=target_components.lm_head,
@@ -583,16 +711,38 @@ def main():
     start_epoch = ckpt_info[0]
     global_step = ckpt_info[1]
 
-    optimizer = BF16Optimizer(
-        draft_model,
-        lr=args.learning_rate,
-        max_grad_norm=args.max_grad_norm,
-        warmup_ratio=args.warmup_ratio,
-        total_steps=total_steps,
-    )
+    if separate_compressor_lr:
+        # Build two parameter groups so the compressor can use a different LR.
+        draft_only_params = [
+            p
+            for n, p in draft_model.named_parameters()
+            if not n.startswith("compressor.")
+        ]
+        compressor_params = list(compressor.parameters())
+        param_groups = [
+            {"params": draft_only_params, "lr": args.learning_rate},
+            {"params": compressor_params, "lr": compressor_lr},
+        ]
+        optimizer = BF16Optimizer(
+            param_groups=param_groups,
+            max_grad_norm=args.max_grad_norm,
+            warmup_ratio=args.warmup_ratio,
+            total_steps=total_steps,
+        )
+    else:
+        optimizer = BF16Optimizer(
+            draft_model,
+            lr=args.learning_rate,
+            max_grad_norm=args.max_grad_norm,
+            warmup_ratio=args.warmup_ratio,
+            total_steps=total_steps,
+        )
 
     if resume_state is not None:
         optimizer.load_state_dict(resume_state)
+        if compressor is not None and "compressor_state_dict" in resume_state:
+            compressor.load_state_dict(resume_state["compressor_state_dict"])
+            print_on_rank0("Restored compressor weights from checkpoint")
         start_epoch = resume_state["epoch"]
         global_step = resume_state["global_step"]
         del resume_state
@@ -600,6 +750,12 @@ def main():
             f"Restored optimizer/scheduler state: "
             f"epoch={start_epoch}, step={global_step}, "
             f"lr={optimizer.get_learning_rate():.6f}"
+        )
+
+    compressor_loss_fn = None
+    if args.use_compressor:
+        compressor_loss_fn = HiddenStatePreservationLoss(
+            loss_type=args.compressor_loss_type,
         )
 
     skip_steps = global_step - start_epoch * len(train_dataloader)
@@ -630,16 +786,53 @@ def main():
             input_ids = data["input_ids"].to(device, non_blocking=True)
             attention_mask = data["attention_mask"].to(device, non_blocking=True)
             loss_mask = data["loss_mask"].to(device, non_blocking=True)
-            target_output = target_model.generate_dflash_data(
-                input_ids, attention_mask, loss_mask
-            )
-            hidden_states = target_output.hidden_states.to(device, non_blocking=True)
+
+            if args.use_compressor:
+                # Teacher: full-length target hidden states (no gradient).
+                with torch.no_grad():
+                    teacher_output = target_model.generate_dflash_data(
+                        input_ids,
+                        attention_mask,
+                        loss_mask,
+                        use_compression=False,
+                        requires_grad=False,
+                    )
+                # Student: compressed-length target hidden states (gradient flows
+                # through the compressor).
+                student_output = target_model.generate_dflash_data(
+                    input_ids,
+                    attention_mask,
+                    loss_mask,
+                    use_compression=True,
+                    requires_grad=True,
+                )
+                compress_loss = compressor_loss_fn(
+                    student_output.hidden_states, teacher_output.hidden_states
+                )
+                # The draft model is still trained on the uncompressed teacher
+                # hidden states.  Using the compressed sequence for the draft
+                # context requires aligning anchor positions with the compressed
+                # sequence length (see TODO in core/dflash.py / OnlineDFlashModel).
+                hidden_states = teacher_output.hidden_states.to(
+                    device, non_blocking=True
+                )
+            else:
+                target_output = target_model.generate_dflash_data(
+                    input_ids, attention_mask, loss_mask
+                )
+                hidden_states = target_output.hidden_states.to(
+                    device, non_blocking=True
+                )
+                compress_loss = 0.0
 
             loss, accuracy, _model_metrics = dflash_model(
                 input_ids=input_ids,
                 hidden_states=hidden_states,
                 loss_mask=loss_mask,
             )
+
+            if args.use_compressor:
+                loss = loss + args.compressor_loss_weight * compress_loss
 
             (loss / args.accumulation_steps).backward()
 
@@ -678,11 +871,23 @@ def main():
 
             if global_step % args.save_interval == 0:
                 save_checkpoint(
-                    args, epoch, global_step, dflash_model, draft_model, optimizer
+                    args,
+                    epoch,
+                    global_step,
+                    dflash_model,
+                    draft_model,
+                    optimizer,
+                    compressor=compressor,
                 )
 
     save_checkpoint(
-        args, args.num_epochs, global_step, dflash_model, draft_model, optimizer
+        args,
+        args.num_epochs,
+        global_step,
+        dflash_model,
+        draft_model,
+        optimizer,
+        compressor=compressor,
     )
 
     tracker.close()
