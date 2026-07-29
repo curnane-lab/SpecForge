@@ -1,61 +1,92 @@
-# VLM DFlash Support — Port Status (add_vl_support)
+# VLM DFlash Support — Status (add_vl_support)
 
 This branch ports sgl-project/SpecForge PR #585 (commit `9323a510`, author zyk42)
-onto the server-only unified runtime. This document records what landed, what was
-deliberately not ported, and what is still missing for end-to-end VLM DFlash
-training.
+onto the server-only unified runtime **and implements end-to-end multimodal
+(image+text) DFlash training on top of it**. This document records what landed,
+what was deliberately not ported, and the validation status.
 
 ## What this branch contains
 
+### Foundation (ported from PR #585)
+
 - **Draft model (VLM-capable)** — `specforge/modeling/draft/dflash.py`:
-  - `apply_rotary_pos_emb` supports partial rotation (`rotary_dim < head_dim`,
-    required by Qwen3.5/Qwen3.6 with `partial_rotary_factor=0.25`).
-  - `Qwen3InterleavedMultiRotaryEmbedding` + `mrope_interleaved` selection for
-    Qwen3-VL style interleaved mRoPE position ids.
+  partial rotation in `apply_rotary_pos_emb` (`rotary_dim < head_dim`, for
+  Qwen3.5/Qwen3.6 `partial_rotary_factor=0.25`) and
+  `Qwen3InterleavedMultiRotaryEmbedding` selected by
+  `rope_scaling.mrope_interleaved`.
 - **Draft configs** — `configs/qwen3-vl-8b-dflash-vlm-8layer.json`,
   `configs/qwen3-vl-30b-a3b-dflash-vlm-8layer.json`,
   `configs/qwen3.5-9b-dflash-vlm-8layer.json`,
-  `configs/qwen3.5-35b-a3b-dflash-vlm-8layer.json`
-  (mRoPE sections, `partial_rotary_factor`, per-family `target_layer_ids`;
-  Qwen3-VL skips the first 3 deepstack layers).
-- **Weight-key resolution** — `specforge/modeling/target/target_utils.py`:
-  `QWEN3_VL_MODEL_TYPES` + `resolve_target_weight_keys()`;
-  `TargetEmbeddingsAndHead.from_pretrained` auto-selects
-  `model.language_model.embed_tokens.weight` for VLM targets when the embed key
-  is unset or left at the LLM default. Explicit keys are honored.
-  `populate_dflash_generated_config` reads language-model depth via the
-  `text_config` fallback.
+  `configs/qwen3.5-35b-a3b-dflash-vlm-8layer.json` (from #585), plus
+  `configs/qwen3.5-4b-vl-dflash.json` (new, mirrors the Qwen3.5-4B target
+  geometry: head_dim 256, mrope_section [11,11,10],
+  partial_rotary_factor 0.25).
+- **Weight-key resolution** — `resolve_target_weight_keys()` in
+  `specforge/modeling/target/target_utils.py` auto-selects
+  `model.language_model.embed_tokens.weight` for VLM targets;
+  `populate_dflash_generated_config` reads language-model depth via
+  `text_config`.
+
+### Multimodal capture (new in this branch)
+
+End-to-end data flow: **JSONL (+ image) → expanded ids/loss mask → capture
+request (single-placeholder ids + base64 image) → patched SGLang server
+expands, runs the ViT, captures aux hidden states + mRoPE positions →
+Mooncake → collator → training forward with 3D position ids**.
+
+- `model.input_modality: multimodal` (DFlash only): a `FeatureContract`
+  (`{input_ids, loss_mask, hidden_states, position_ids}`) and a
+  `ServerStreamingProvider` with a VLM `ServerInputAdapter`
+  (`specforge/algorithms/common/vlm_input.py`).
+- `specforge/data/vlm_preprocessing.py`: ShareGPT-style records with an
+  optional `image` field (path or base64); the target's own chat template and
+  HF processor produce the expanded `input_ids`/`loss_mask` (image region
+  expanded in id space, mask zeros). One image per sample max (v1); text-only
+  samples work in the same run.
+- `ServerCaptureLayout.position_ids_feature` → the capture request's
+  `features["position_ids"]`; the patched server writes the request's mRoPE
+  positions `(1, L, 3) int64` into Mooncake (`_spec_capture_position_ids` in
+  the scheduler sink; text requests get the arange broadcast fallback).
+- `patches/sglang/v0.5.14/spec-capture.patch`: regenerated with the
+  `position_ids` artifact (`SpecCaptureSink.put_sample(position_ids=...)`).
+  Multimodal capture requests ride the stock `input_ids` + `image_data`
+  `/generate` path with `SGLANG_MM_AVOID_RETOKENIZE=1` (set by the managed
+  launcher for `input_modality=multimodal`), so the server re-expands
+  placeholders in id space with zero retokenization drift — and the
+  passthrough/seq-len checks fail loudly if client and server expansions ever
+  disagree.
+- Training: `OnlineDFlashModel.forward(..., position_ids=None)` gathers 3D
+  mRoPE positions for context + anchor-offset draft slots
+  (`(3, B, S + N·bs)`); `DFlashTrainStrategy` passes the collated
+  `position_ids` tensor through. Text runs are byte-identical to before.
+- Recipe: `examples/configs/qwen3.5-4b-vl-dflash-multimodal-npu.yaml`
+  (single-node Ascend NPU managed stack).
 
 ## Not ported (by design)
 
-PR #585 targeted the pre-#678 script/HF-backend stack, which no longer exists on
-main. The following were **not** carried over:
+- HF-backend VLM capture (`dflash_target_model.py`, `_build_vlm_reqs`,
+  `mm_token_type_ids`) and the `train_dflash.py --is-vlm` plumbing from the
+  pre-#678 script stack — superseded by server capture.
+- `QwenVLOnlineDFlashModel` wiring — PR #585 referenced this class but never
+  defined it; the unified runtime needs no separate VLM wrapper class.
+- Two accidental reverts in the original #585 diff (domino projector code,
+  D-PACE CLI args) were dropped during the cherry-pick.
+- Offline (precomputed hidden states) multimodal capture: the offline path
+  stays text-only for now.
+- Online evaluation for multimodal runs.
 
-- HF-backend VLM capture (`specforge/modeling/target/dflash_target_model.py`,
-  ~580 lines: `_build_vlm_reqs`, `MRotaryEmbedding.get_rope_index`,
-  `mm_token_type_ids` generation, pixel_values slicing).
-- `scripts/train_dflash.py` VLM plumbing (`--is-vlm`, processor loading,
-  mixed text+VLM batches at `batch_size=1`).
-- `QwenVLOnlineDFlashModel` wiring — note that PR #585 **referenced this class
-  but never defined it** (it lived in the author's private stack).
-- Two accidental reverts in the original diff (domino projector code, D-PACE
-  CLI args) were dropped during the cherry-pick.
+## Validation status
 
-## Missing for end-to-end VLM training
-
-**Server-side multimodal capture.** Online capture now runs on an external
-SGLang server (spec-capture patch + Mooncake transport). Training a VLM DFlash
-additionally needs:
-
-1. The capture server to accept multimodal requests (pixel values / image
-   tokens) and produce aux hidden states + mRoPE position ids for them.
-2. A `modality="multimodal"` `FeatureContract` plus collator/schema support in
-   `specforge/algorithms/*` (today every built-in algorithm declares
-   `modality="text"` only).
-
-Until then this branch is the **foundation layer**: draft model + configs +
-weight-key resolution. Text-only DFlash/Domino training (including on Ascend
-NPU, via the merged `npu_disaggregated` work) is unaffected.
+- **Verified (CPU, this repo)**: registration parity and provider gates,
+  request/payload construction, expansion math, collator, golden
+  topology/recipe tests — `tests/test_algorithms/test_dflash_multimodal.py`
+  plus the updated `test_config` suites (80 passed locally, 2 torch tests
+  skipped pending GPU).
+- **Verified statically**: the regenerated patch applies cleanly both ways to
+  pristine sglang v0.5.14 (`git apply --check` / `--reverse --check`).
+- **Not yet verified (needs GPU/NPU)**: a live multimodal capture run
+  (Qwen3-VL / Qwen3.5 target + ViT + mRoPE positions) and an end-to-end
+  training run. This is the next step; see the recipe above.
 
 ## Reference results from PR #585 (HF stack, author-validated)
 

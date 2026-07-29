@@ -73,6 +73,10 @@ class ExampleDraftConfigWiringTest(unittest.TestCase):
             {
                 "qwen2-5-vl-7b-eagle3.json",
                 "qwen2.5-vl-32b-eagle3.json",
+                "qwen3-vl-30b-a3b-dflash-vlm-8layer.json",
+                "qwen3-vl-8b-dflash-vlm-8layer.json",
+                "qwen3.5-35b-a3b-dflash-vlm-8layer.json",
+                "qwen3.5-9b-dflash-vlm-8layer.json",
             },
         )
 
