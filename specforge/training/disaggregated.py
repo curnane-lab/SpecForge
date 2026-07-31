@@ -591,6 +591,18 @@ def _build_online(
             for url in _server_urls(cfg)
         ]
         target_repr = streaming.target_representation
+        lease = cfg.runtime.producer_lease
+        if modality != "text" and lease > 1:
+            # Multimodal capture batches concatenate every image in one ViT
+            # forward, whose N^2 attention memory scales with total patches;
+            # batching image requests can OOM the capture server (a few large
+            # images already reach ~10^5 patches). Serialize them.
+            print(
+                f"WARNING: clamping producer_lease {lease} -> 1 for "
+                f"modality {modality!r} (multimodal capture requests are "
+                "sent one image per call to bound vision-encoder memory)"
+            )
+            lease = 1
         peer_wait_timeout_s = _optional_timeout_s("DISAGG_PEER_WAIT_TIMEOUT")
         high_watermark_override = os.environ.get("DISAGG_IN_FLIGHT_HIGH_WATERMARK")
         in_flight_high_watermark = int(
@@ -624,7 +636,7 @@ def _build_online(
             aux_hidden_state_layer_ids=layers,
             prompt_epochs=cfg.training.num_epochs,
             prompt_seed=cfg.training.seed,
-            lease=cfg.runtime.producer_lease,
+            lease=lease,
             in_flight_high_watermark=in_flight_high_watermark,
             in_flight_low_watermark=in_flight_low_watermark,
             resident_high_watermark_bytes=(
