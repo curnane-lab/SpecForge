@@ -40,18 +40,10 @@ def convert_mtp_keys(
 ) -> Dict[str, torch.Tensor]:
     """Convert MTP weight keys to the requested output format.
 
-    SpecForge training saves keys in the flat native layout:
-        mtp.layers.0.self_attn.q_proj.weight
-        mtp.pre_fc_norm_embedding.weight
-        mtp.norm.weight
-        ...
-
-    This flat layout is what both SGLang's ``Qwen3_5ForCausalLMMTP.load_weights``
-    (``mtp.`` -> ``model.`` remap, flat ``Qwen3_5ForCausalLM``) and the native
-    HuggingFace / vLLM MTP modules expect, so both formats are identical.
-    The ``fmt`` argument is kept for backward compatibility; ``sglang`` and
-    ``hf`` both return the flat layout unchanged. A legacy nested layout
-    (``mtp.model.layers.0.*``) is also normalized to flat if encountered.
+    Training already saves the flat native layout that both SGLang and
+    HF/vLLM MTP modules expect, so ``sglang`` and ``hf`` both return it
+    unchanged; ``fmt`` is kept for backward compatibility. A legacy nested
+    layout (``mtp.model.layers.0.*``) is normalized to flat.
     """
     converted = {}
     for k, v in state_dict.items():

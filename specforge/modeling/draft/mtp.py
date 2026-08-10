@@ -294,16 +294,6 @@ class Qwen3MTPDecoderLayer(GradientCheckpointingLayer):
 class Qwen3_5MTPModel(nn.Module):
     """The core MTP module wrapped under the ``mtp.`` prefix.
 
-    Weight key layout (flat, matches the native Qwen3.5 checkpoint and
-    SGLang's ``Qwen3_5ForCausalLMMTP.load_weights`` remap):
-      mtp.pre_fc_norm_embedding.weight
-      mtp.pre_fc_norm_hidden.weight
-      mtp.fc.weight
-      mtp.layers.0.self_attn.q_proj.weight
-      mtp.layers.0.mlp.gate_proj.weight
-      mtp.norm.weight
-      mtp.lm_head.weight
-
     SGLang's ``Qwen3_5ForCausalLMMTP`` wraps a *flat* ``Qwen3_5ForCausalLM``
     (``self.layers`` directly on the ForCausalLM, not nested under
     ``self.model``), so after the ``mtp.`` -> ``model.`` remap the flat keys
