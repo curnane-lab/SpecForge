@@ -253,9 +253,7 @@ class DraftBaseContractTest(unittest.TestCase):
         draft = Qwen3_5MTPDraftModel(_tiny_config())
         native = draft.native_state_dict()
         self.assertTrue(native)
-        self.assertTrue(
-            all(key.startswith(draft.NATIVE_KEY_PREFIX) for key in native)
-        )
+        self.assertTrue(all(key.startswith(draft.NATIVE_KEY_PREFIX) for key in native))
         self.assertIn("mtp.fc.weight", native)
 
 
@@ -295,9 +293,7 @@ class SelectiveCheckpointLoadingTest(unittest.TestCase):
 
             self.assertEqual(weight_map, read_weight_map(tmpdir))
             self.assertEqual(4, len(list_checkpoint_keys(tmpdir)))
-            selected = load_selected_tensors(
-                tmpdir, lambda key: key.startswith("mtp.")
-            )
+            selected = load_selected_tensors(tmpdir, lambda key: key.startswith("mtp."))
 
         self.assertEqual({"mtp.fc.weight", "mtp.norm.weight"}, set(selected))
         self.assertTrue(torch.equal(selected["mtp.norm.weight"], torch.ones(4)))
@@ -312,9 +308,7 @@ class SelectiveCheckpointLoadingTest(unittest.TestCase):
                 {"mtp.fc.weight": torch.zeros(4, 4), "other.weight": torch.zeros(1)},
                 os.path.join(tmpdir, "model.safetensors"),
             )
-            selected = load_selected_tensors(
-                tmpdir, lambda key: key.startswith("mtp.")
-            )
+            selected = load_selected_tensors(tmpdir, lambda key: key.startswith("mtp."))
         self.assertEqual({"mtp.fc.weight"}, set(selected))
 
 

@@ -165,9 +165,7 @@ def merge_state_into_checkpoint(
             weight_map[key] = shard_name
 
         index["weight_map"] = weight_map
-        with open(
-            os.path.join(output_dir, os.path.basename(index_files[0])), "w"
-        ) as f:
+        with open(os.path.join(output_dir, os.path.basename(index_files[0])), "w") as f:
             json.dump(index, f, indent=2)
         return
 

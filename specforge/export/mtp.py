@@ -63,9 +63,7 @@ def _resolve_key_candidates(
                     embed = list(
                         getattr(draft_cls, "TARGET_EMBED_KEY_CANDIDATES", embed)
                     )
-                    head = list(
-                        getattr(draft_cls, "TARGET_HEAD_KEY_CANDIDATES", head)
-                    )
+                    head = list(getattr(draft_cls, "TARGET_HEAD_KEY_CANDIDATES", head))
                     prefix = getattr(draft_cls, "NATIVE_KEY_PREFIX", prefix)
         except Exception as exc:  # pragma: no cover - defensive
             print(f"  warning: could not resolve draft key candidates: {exc}")
