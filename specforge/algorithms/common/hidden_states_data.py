@@ -1,4 +1,4 @@
-"""Shared DFlash-family normalization and padding adapters."""
+"""Shared hidden-states normalization and padding adapters (DFlash-family, DSpark, MTP)."""
 
 from __future__ import annotations
 
