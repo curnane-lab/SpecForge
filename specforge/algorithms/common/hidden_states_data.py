@@ -1,4 +1,7 @@
-"""Shared hidden-states normalization and padding adapters (DFlash-family, DSpark, MTP)."""
+"""Shared hidden-states normalization and padding adapters.
+
+Used by the DFlash-family (DFlash/Domino/DSpark) and MTP algorithms.
+"""
 
 from __future__ import annotations
 
