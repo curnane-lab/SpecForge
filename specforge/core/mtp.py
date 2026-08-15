@@ -24,7 +24,7 @@ class OnlineMTPModel(nn.Module):
     ``specforge/modeling/draft/mtp/``).
 
     Args:
-        draft_model: The MTP draft model (e.g. Qwen3_5MTPDraftModel).
+        draft_model: The MTP draft model (e.g. ``modeling/draft/mtp/qwen3_5.py``).
         ploss_decay: Per-layer loss decay.  For a single MTP layer this is
             unused, but kept for multi-layer extension.
     """
