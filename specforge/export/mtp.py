@@ -162,7 +162,7 @@ def _patch_text_config(base_config: dict, draft_config: dict) -> dict:
     Some Qwen3.5 base checkpoints omit ``head_dim`` in ``text_config``; vLLM's
     ``Qwen3_5TextConfig`` then falls back to its default (``head_dim=256``),
     which mismatches the trained MTP weights (e.g. q_norm/k_norm shape 128).
-    We sync only the structural dims that must agree between base and draft.
+    Only the structural dims that must agree between base and draft are synced.
     """
 
     keys_to_sync = [
@@ -227,7 +227,7 @@ def merge_mtp_into_base(
     mtp_state = _load_first_checkpoint(mtp_checkpoint_path)
     mtp_state = convert_mtp_keys(mtp_state, key_format, prefix)
 
-    # Determine whether word embeddings are tied so we know whether a separate
+    # Determine whether word embeddings are tied to decide whether a separate
     # lm_head must be materialized for the MTP module.
     tie_word_embeddings = True
     base_config_path = os.path.join(base_model_path, "config.json")

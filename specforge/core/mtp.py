@@ -49,7 +49,7 @@ class OnlineMTPModel(nn.Module):
         In serving, the draft model's input_ids are the target input_ids shifted
         right by one (draft position t sees token x_{t+1}) and it predicts the
         token after that (x_{t+2}) using the target's post-norm hidden state at
-        position t.  We therefore train with:
+        position t.  Training therefore uses:
           - draft input: input_ids[:, 1:]  (x_1..x_T, padded)
           - label:       x_2..x_T followed by a pad (length matches logits)
         """
