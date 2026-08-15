@@ -48,6 +48,7 @@ method-specific Python training entry points.
 | **[DFlash](https://arxiv.org/abs/2602.06036)** | Block-parallel drafting | [Online](./examples/configs/qwen3-8b-dflash-online.yaml) / [Disaggregated](./examples/configs/qwen3-8b-dflash-disaggregated.yaml) | [D-PACE](https://arxiv.org/abs/2605.18810) |
 | **[Domino](https://arxiv.org/html/2605.29707v1)** | DFlash with GRU logit correction | [Online](./examples/configs/qwen3-8b-domino-online.yaml) / [Disaggregated](./examples/configs/qwen3-8b-domino-disaggregated.yaml) | — |
 | **[DSpark](https://arxiv.org/abs/2607.05147)** | Confidence-Scheduled Semi-Autoregressive Generation | [Disaggregated](./examples/configs/qwen3-4b-dspark-disaggregated.yaml) | — |
+| **MTP** | Native MTP head fine-tuning (Qwen3.5) | [Disaggregated NPU](./examples/configs/qwen3.5-4b-mtp-disaggregated-npu.yaml) | — |
 
 See the [training guide](./docs/basic_usage/training.md) for the supported
 method/topology matrix and the

@@ -234,6 +234,7 @@ The checked-in examples are the canonical starting points:
 | EAGLE3 offline disaggregated | [`qwen3-8b-eagle3-offline-disaggregated.yaml`](../../examples/configs/qwen3-8b-eagle3-offline-disaggregated.yaml) |
 | Ascend NPU DFlash online | [`qwen3.5-4b-dflash-online-npu.yaml`](../../examples/configs/qwen3.5-4b-dflash-online-npu.yaml) |
 | Ascend NPU Domino online | [`qwen3.5-4b-domino-online-npu.yaml`](../../examples/configs/qwen3.5-4b-domino-online-npu.yaml) |
+| Ascend NPU MTP disaggregated | [`qwen3.5-4b-mtp-disaggregated-npu.yaml`](../../examples/configs/qwen3.5-4b-mtp-disaggregated-npu.yaml) |
 
 ## Online and offline data
 
@@ -262,6 +263,7 @@ The unified runtime supports text training in these combinations:
 | DFlash | Yes, consumer DP | Yes, DP | Yes, consumer DP |
 | Domino | Yes, consumer DP | Yes, DP | Yes, consumer DP |
 | DSpark | Yes, consumer DP | Yes, DP | Yes, consumer DP |
+| MTP | Yes, consumer DP | Yes, DP | Yes, consumer DP |
 | P-EAGLE | Yes, consumer DP, batch size 1 | No | No |
 
 Unsupported combinations fail explicitly during config validation or run
@@ -274,10 +276,10 @@ assembly. In particular:
 - attention backends are strategy-specific: EAGLE3 accepts `sdpa`,
   `flex_attention`, `fa`, or offline `usp`; P-EAGLE requires
   `flex_attention`; DFlash, Domino, and DSpark accept `eager`, `sdpa`, or
-  `flex_attention`;
+  `flex_attention`; MTP accepts `eager` or `sdpa`;
 - P-EAGLE requires `training.batch_size=1` and reuses EAGLE3's server capture
   schema;
-- offline feature training supports EAGLE3, DFlash, Domino, and DSpark;
+- offline feature training supports EAGLE3, DFlash, Domino, DSpark, and MTP;
 - every online run is disaggregated and uses `model.target_backend=sglang`;
   finite runs may omit both step fields so the producer can publish the exact
   optimizer horizon derived from the prepared prompt plan;
