@@ -114,10 +114,98 @@ def load_tensors_by_keys(
     return load_selected_tensors(checkpoint_dir, lambda key: key in wanted)
 
 
+def merge_state_into_checkpoint(
+    base_checkpoint_dir: str,
+    state: Dict[str, torch.Tensor],
+    output_dir: str,
+    *,
+    shard_name: str,
+    drop_prefixes: Iterable[str] = (),
+) -> None:
+    """Merge a state dict into a copy of a base checkpoint (model-agnostic).
+
+    Copies non-weight files, drops base weight entries under ``drop_prefixes``,
+    and merges ``state``.  Sharded bases get ``state`` written to a new
+    ``shard_name`` shard with the index ``weight_map`` updated in place (the
+    large base shards are never rewritten); single-file bases are rewritten
+    whole under their original file name.
+    """
+
+    import shutil
+
+    from safetensors.torch import save_file
+
+    os.makedirs(output_dir, exist_ok=True)
+    prefixes = tuple(drop_prefixes)
+
+    # Copy non-weight files so the output directory is self-contained.
+    for fname in os.listdir(base_checkpoint_dir):
+        src = os.path.join(base_checkpoint_dir, fname)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(output_dir, fname))
+
+    index_files = glob.glob(os.path.join(base_checkpoint_dir, "*.index.json"))
+    if index_files:
+        with open(index_files[0], "r") as f:
+            index = json.load(f)
+        weight_map = index.get("weight_map", {})
+
+        old_keys = [k for k in weight_map if k.startswith(prefixes)]
+        for key in old_keys:
+            del weight_map[key]
+        if old_keys:
+            print(
+                f"Replaced {len(old_keys)} weight entries under {prefixes} "
+                "from base model."
+            )
+
+        # Write the incoming tensors to a dedicated shard; base shards untouched.
+        save_file(state, os.path.join(output_dir, shard_name))
+        for key in state.keys():
+            weight_map[key] = shard_name
+
+        index["weight_map"] = weight_map
+        with open(
+            os.path.join(output_dir, os.path.basename(index_files[0])), "w"
+        ) as f:
+            json.dump(index, f, indent=2)
+        return
+
+    # Single-file base: load, drop, merge, rewrite under the original name.
+    base_safetensors = glob.glob(os.path.join(base_checkpoint_dir, "*.safetensors"))
+    base_bins = glob.glob(os.path.join(base_checkpoint_dir, "*.bin"))
+    if not base_safetensors and not base_bins:
+        raise FileNotFoundError(f"No checkpoint found in {base_checkpoint_dir}")
+    base_state = (
+        load_selected_tensors(base_checkpoint_dir, lambda _key: True)
+        if base_safetensors
+        else torch.load(base_bins[0], map_location="cpu", weights_only=True)
+    )
+    out_name = os.path.basename(
+        base_safetensors[0] if base_safetensors else base_bins[0]
+    )
+
+    old_keys = [k for k in base_state if k.startswith(prefixes)]
+    for key in old_keys:
+        del base_state[key]
+    if old_keys:
+        print(
+            f"Replaced {len(old_keys)} weight entries under {prefixes} "
+            "from base model."
+        )
+
+    merged = {**base_state, **state}
+    if out_name.endswith(".safetensors"):
+        save_file(merged, os.path.join(output_dir, out_name))
+    else:
+        torch.save(merged, os.path.join(output_dir, out_name))
+
+
 __all__ = [
     "list_checkpoint_keys",
     "load_selected_tensors",
     "load_tensors_by_keys",
+    "merge_state_into_checkpoint",
     "read_weight_map",
     "resolve_checkpoint_dir",
 ]

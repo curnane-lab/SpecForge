@@ -1,9 +1,13 @@
 # coding=utf-8
 """Merge a trained MTP draft checkpoint back into the base target checkpoint.
 
-The exporter owns checkpoint/index writing.  Architecture-specific knowledge
-(target-side embed/lm_head key candidates, native key prefix) comes from the
-registered MTP draft class — see ``specforge/modeling/draft/mtp/``.
+This module owns the MTP-specific merge policy (native key prefix handling,
+shared-embedding backfill, config patching).  The model-independent merge
+machinery — copying non-weight files, replacing keys by prefix, shard/index
+writing — lives in ``specforge/modeling/target/checkpoint.py``.
+Architecture-specific knowledge (target-side embed/lm_head key candidates,
+native key prefix) comes from the registered MTP draft class — see
+``specforge/modeling/draft/mtp/``.
 """
 
 from __future__ import annotations
@@ -12,15 +16,14 @@ import glob
 import json
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from specforge.modeling.target.checkpoint import (
     load_selected_tensors,
-    read_weight_map,
+    load_tensors_by_keys,
+    merge_state_into_checkpoint,
 )
 
 
@@ -221,14 +224,6 @@ def merge_mtp_into_base(
         mtp_checkpoint_path
     )
 
-    # Copy non-weight files from the base model so the output directory is a
-    # fully self-contained HF checkpoint.
-    for fname in os.listdir(base_model_path):
-        src = os.path.join(base_model_path, fname)
-        dst = os.path.join(output_path, fname)
-        if os.path.isfile(src):
-            shutil.copy2(src, dst)
-
     # Load MTP weights. The trainer saves them as a draft_model checkpoint:
     # model.safetensors + config.json + mtp.py.
     mtp_state = _load_first_checkpoint(mtp_checkpoint_path)
@@ -245,83 +240,17 @@ def merge_mtp_into_base(
         text_cfg = base_cfg.get("text_config", base_cfg)
         tie_word_embeddings = text_cfg.get("tie_word_embeddings", True)
 
-    # Sharded base: write MTP weights into a dedicated shard and patch the index,
-    # so the (large) base shards are never rewritten.
-    weight_map = read_weight_map(base_model_path)
-    index_files = glob.glob(os.path.join(base_model_path, "*.index.json"))
-    if index_files:
-        with open(index_files[0], "r") as f:
-            index = json.load(f)
-        weight_map = index.get("weight_map", weight_map)
-
-        # If the base checkpoint already contains native MTP weights (e.g. an
-        # official Qwen3.5 checkpoint), drop the old MTP entries so the trained
-        # MTP weights replace them rather than duplicating them.
-        old_mtp_keys = [k for k in weight_map if k.startswith(prefix)]
-        for key in old_mtp_keys:
-            del weight_map[key]
-        if old_mtp_keys:
-            print(
-                f"Replaced {len(old_mtp_keys)} native MTP weight entries "
-                "from base model."
-            )
-
-        # If the trained checkpoint did not save shared embeddings, copy them
-        # from the base model shards so vLLM/SGLang can initialise the MTP
-        # embed_tokens/lm_head from the merged checkpoint.
-        embed_target = f"{prefix}embed_tokens.weight"
-        head_target = f"{prefix}lm_head.weight"
-        if embed_target not in mtp_state or (
-            not tie_word_embeddings and head_target not in mtp_state
-        ):
-            base_state = load_tensors_for_merge(
-                base_model_path,
-                weight_map,
-                embed_key_candidates + head_key_candidates,
-            )
-            mtp_state = _copy_shared_embeddings(
-                base_state,
-                mtp_state,
-                tie_word_embeddings,
-                embed_key_candidates,
-                head_key_candidates,
-                prefix,
-            )
-
-        # Write MTP weights into a dedicated shard.
-        mtp_shard_name = "mtp-merged.safetensors"
-        save_file(mtp_state, os.path.join(output_path, mtp_shard_name))
-
-        # Update the weight map with the new MTP keys.
-        for key in mtp_state.keys():
-            weight_map[key] = mtp_shard_name
-
-        # Save the updated index. Re-use the original index file name.
-        index["weight_map"] = weight_map
-        with open(
-            os.path.join(output_path, os.path.basename(index_files[0])), "w"
-        ) as f:
-            json.dump(index, f, indent=2)
-    else:
-        # Single-file checkpoint: load base weights, merge, and rewrite.
-        base_state = _load_first_checkpoint(base_model_path)
-        base_safetensors = glob.glob(os.path.join(base_model_path, "*.safetensors"))
-        base_bins = glob.glob(os.path.join(base_model_path, "*.bin"))
-        out_name = os.path.basename(
-            base_safetensors[0] if base_safetensors else base_bins[0]
+    # If the trained checkpoint did not save shared embeddings, copy them from
+    # the base checkpoint so vLLM/SGLang can initialise the MTP embed_tokens/
+    # lm_head from the merged checkpoint.
+    embed_target = f"{prefix}embed_tokens.weight"
+    head_target = f"{prefix}lm_head.weight"
+    if embed_target not in mtp_state or (
+        not tie_word_embeddings and head_target not in mtp_state
+    ):
+        base_state = load_tensors_by_keys(
+            base_model_path, embed_key_candidates + head_key_candidates
         )
-
-        # Remove any native MTP weights from the base state before overwriting
-        # with the trained MTP weights.
-        old_mtp_keys = [k for k in base_state if k.startswith(prefix)]
-        for key in old_mtp_keys:
-            del base_state[key]
-        if old_mtp_keys:
-            print(
-                f"Replaced {len(old_mtp_keys)} native MTP weight entries "
-                "from base model."
-            )
-
         mtp_state = _copy_shared_embeddings(
             base_state,
             mtp_state,
@@ -331,12 +260,15 @@ def merge_mtp_into_base(
             prefix,
         )
 
-        merged = {**base_state, **mtp_state}
-
-        if out_name.endswith(".safetensors"):
-            save_file(merged, os.path.join(output_path, out_name))
-        else:
-            torch.save(merged, os.path.join(output_path, out_name))
+    # The generic merge machinery (copy, prefix-key replacement, shard/index
+    # writing) lives in modeling/target/checkpoint.py.
+    merge_state_into_checkpoint(
+        base_model_path,
+        mtp_state,
+        output_path,
+        shard_name="mtp-merged.safetensors",
+        drop_prefixes=(prefix,),
+    )
 
     # Ensure the merged config exposes the MTP structural dims.  vLLM/SGLang
     # use these values to build the MTP module; if the base config omits
@@ -362,26 +294,6 @@ def merge_mtp_into_base(
     print(f"Merged checkpoint saved to {output_path}")
     print(f"  key format: {key_format}")
     print(f"  MTP tensors merged: {len(mtp_state)}")
-
-
-def load_tensors_for_merge(
-    base_model_path: str,
-    weight_map: Dict[str, str],
-    candidates: List[str],
-) -> Dict[str, torch.Tensor]:
-    """Load the given base-checkpoint tensors (only shards that hold them)."""
-
-    base_state: Dict[str, torch.Tensor] = {}
-    for candidate in candidates:
-        if candidate not in weight_map:
-            continue
-        shard_path = os.path.join(base_model_path, weight_map[candidate])
-        if not os.path.exists(shard_path):
-            continue
-        with safe_open(shard_path, framework="pt") as f:
-            if candidate in f.keys():
-                base_state[candidate] = f.get_tensor(candidate)
-    return base_state
 
 
 __all__ = ["convert_mtp_keys", "merge_mtp_into_base"]

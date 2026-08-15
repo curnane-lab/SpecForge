@@ -199,6 +199,30 @@ class NativeMTPInitTest(unittest.TestCase):
             )
         self.assertTrue(torch.equal(draft.mtp.fc.weight, before))
 
+    def test_native_init_covers_all_mtp_parameters(self):
+        """A native checkpoint shipping the full mtp.* key set must overwrite
+        every draft native parameter — none may keep its random init."""
+        from safetensors.torch import save_file
+
+        config = _tiny_config()
+        draft = Qwen3_5MTPDraftModel(config)
+        native_keys = set(draft.native_state_dict())
+        replacement = {
+            key: torch.ones_like(value)
+            for key, value in draft.native_state_dict().items()
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mtp-native-init-") as tmpdir:
+            save_file(replacement, f"{tmpdir}/model.safetensors")
+            _init_from_native_mtp(_cfg(tmpdir), draft)
+
+        after = draft.native_state_dict()
+        self.assertEqual(native_keys, set(after))
+        for key, value in after.items():
+            self.assertTrue(
+                torch.all(value == 1), f"{key} was not loaded from native weights"
+            )
+
 
 class DraftBaseContractTest(unittest.TestCase):
     def test_share_target_embeddings_freezes_and_shares(self):
