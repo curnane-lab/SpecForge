@@ -69,7 +69,7 @@ EXPECTED_NPROC_PER_NODE = {
     "qwen3.5-4b-dflash-online-npu.yaml": 8,
     "qwen3.5-4b-dflash-disaggregated-npu.yaml": 14,
     "qwen3.5-4b-domino-online-npu.yaml": 8,
-    "qwen3.5-4b-mtp-disaggregated-npu.yaml": 14,
+    "qwen3.5-4b-mtp-disaggregated-npu.yaml": 10,
     "qwen3.6-27b-dflash-disaggregated.yaml": 2,
     "qwen3.6-27b-dflash-1server-dp2-disaggregated.yaml": 2,
     "qwen3.6-27b-dflash-multiserver-disaggregated.yaml": 2,
@@ -269,10 +269,6 @@ EXPECTED_DISAGGREGATED = {
         "backend": "mooncake",
         "managed_local": {
             "trainer_cuda_visible_devices": [
-                "2",
-                "3",
-                "4",
-                "5",
                 "6",
                 "7",
                 "8",
@@ -292,7 +288,32 @@ EXPECTED_DISAGGREGATED = {
                     "port": 30000,
                     "cuda_visible_devices": ["0"],
                     "tp_size": 1,
-                }
+                },
+                {
+                    "port": 30001,
+                    "cuda_visible_devices": ["1"],
+                    "tp_size": 1,
+                },
+                {
+                    "port": 30002,
+                    "cuda_visible_devices": ["2"],
+                    "tp_size": 1,
+                },
+                {
+                    "port": 30003,
+                    "cuda_visible_devices": ["3"],
+                    "tp_size": 1,
+                },
+                {
+                    "port": 30004,
+                    "cuda_visible_devices": ["4"],
+                    "tp_size": 1,
+                },
+                {
+                    "port": 30005,
+                    "cuda_visible_devices": ["5"],
+                    "tp_size": 1,
+                },
             ],
         },
     },
