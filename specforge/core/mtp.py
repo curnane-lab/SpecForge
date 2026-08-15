@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Online training wrapper for single-layer MTP (Qwen3.5 style).
+"""Online training wrapper for single-layer MTP (architecture-independent).
 
 MTP predicts the next token from the current token's embedding plus the target
 model's last hidden state.  Shift is performed inside this wrapper; the target
@@ -13,12 +13,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from specforge.modeling.draft.mtp import Qwen3_5MTPDraftModel
-
 
 class OnlineMTPModel(nn.Module):
     """
     Online MTP training wrapper.
+
+    Architecture-agnostic: any registered MTP draft module exposing
+    ``forward(input_ids, hidden_states, attention_mask, position_ids)`` and a
+    ``config`` with ``pad_token_id`` can be plugged in (see
+    ``specforge/modeling/draft/mtp/``).
 
     Args:
         draft_model: The MTP draft model (e.g. Qwen3_5MTPDraftModel).
@@ -28,7 +31,7 @@ class OnlineMTPModel(nn.Module):
 
     def __init__(
         self,
-        draft_model: Qwen3_5MTPDraftModel,
+        draft_model: nn.Module,
         ploss_decay: float = 1.0,
     ) -> None:
         super().__init__()
