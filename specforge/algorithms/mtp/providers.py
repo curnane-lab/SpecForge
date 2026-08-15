@@ -85,9 +85,11 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
 
     Qwen3.5-style target checkpoints ship a native MTP head whose keys match
     the draft's flat ``mtp.*`` layout one-to-one.  Loading them turns training
-    into fine-tuning of the native head (the only training mode for this
-    algorithm); when no such weights exist we warn and leave the head at its
-    random initialization.
+    into fine-tuning of the native head — the only training mode for this
+    algorithm.  Initialization is therefore strict by default: when no native
+    ``mtp.*`` weights exist (and no trained draft checkpoint is given),
+    construction fails rather than silently training from random
+    initialization.
     """
 
     import glob
@@ -97,6 +99,7 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
 
     target_path = cfg.model.target_model_path
     native_mtp: dict = {}
+    scan_error = None
     try:
         for shard in sorted(glob.glob(os.path.join(target_path, "*.safetensors"))):
             with safe_open(shard, framework="pt") as handle:
@@ -104,7 +107,7 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
                     if key.startswith("mtp."):
                         native_mtp[key] = handle.get_tensor(key)
     except Exception as exc:  # pragma: no cover - depends on target checkpoint
-        print(f"[mtp] could not scan native mtp.* weights in {target_path}: {exc}")
+        scan_error = exc
 
     if native_mtp:
         draft_model.load_state_dict(native_mtp, strict=False)
@@ -112,11 +115,24 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
             f"[mtp] initialized {len(native_mtp)} native mtp.* weights from "
             f"{target_path} (native-MTP fine-tune)."
         )
-    else:
+        return
+
+    if cfg.model.draft_checkpoint_path:
         print(
-            f"[mtp] WARNING: no native mtp.* weights found in {target_path}; "
-            "the MTP head starts from random initialization."
+            f"[mtp] no native mtp.* weights in {target_path}; weights come from "
+            "the warm-start draft checkpoint."
         )
+        return
+
+    detail = f" (scan failed: {scan_error})" if scan_error is not None else ""
+    raise RuntimeError(
+        f"[mtp] no native mtp.* weights found in {target_path}{detail}. MTP "
+        "training fine-tunes the native MTP head shipped with the target "
+        "checkpoint and does not start from random initialization by default. "
+        "Point model.target_model_path at a checkpoint that ships native MTP "
+        "weights (e.g. Qwen3.5), or set model.draft_checkpoint_path to resume "
+        "from a trained MTP draft."
+    )
 
 
 def _share_target_embeddings(cfg, draft_model, torch_dtype) -> None:
