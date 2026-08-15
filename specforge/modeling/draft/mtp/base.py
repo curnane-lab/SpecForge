@@ -27,6 +27,21 @@ class MTPDraftModel(nn.Module):
     #: Native MTP weights live under this checkpoint key prefix.
     NATIVE_KEY_PREFIX = "mtp."
 
+    #: Target-checkpoint key candidates consulted when merging trained MTP
+    #: weights back into a base checkpoint (see ``specforge/export/mtp.py``).
+    #: Families override these when the target nests its text decoder
+    #: differently (VLM ``model.language_model.*`` vs plain ``model.*``).
+    TARGET_EMBED_KEY_CANDIDATES = [
+        "model.language_model.embed_tokens.weight",
+        "model.embed_tokens.weight",
+        "embed_tokens.weight",
+    ]
+    TARGET_HEAD_KEY_CANDIDATES = [
+        "model.language_model.lm_head.weight",
+        "model.lm_head.weight",
+        "lm_head.weight",
+    ]
+
     embed_tokens: nn.Embedding
     mtp: nn.Module
 

@@ -92,22 +92,23 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
     initialization.
     """
 
-    import glob
-    import os
-
-    from safetensors import safe_open
+    from specforge.modeling.target.checkpoint import (
+        load_selected_tensors,
+        resolve_checkpoint_dir,
+    )
 
     target_path = cfg.model.target_model_path
     prefix = draft_model.NATIVE_KEY_PREFIX
-    native_mtp: dict = {}
-    scan_error = None
     try:
-        for shard in sorted(glob.glob(os.path.join(target_path, "*.safetensors"))):
-            with safe_open(shard, framework="pt") as handle:
-                for key in handle.keys():
-                    if key.startswith(prefix):
-                        native_mtp[key] = handle.get_tensor(key)
+        checkpoint_dir = resolve_checkpoint_dir(
+            target_path, cache_dir=cfg.model.cache_dir
+        )
+        native_mtp = load_selected_tensors(
+            checkpoint_dir, lambda key: key.startswith(prefix)
+        )
+        scan_error = None
     except Exception as exc:  # pragma: no cover - depends on target checkpoint
+        native_mtp = {}
         scan_error = exc
 
     if native_mtp:
