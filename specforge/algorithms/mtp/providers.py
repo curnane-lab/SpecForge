@@ -23,7 +23,7 @@ from specforge.algorithms.common.defaults import (
     one_loss_token,
     online_needs_input_tools,
 )
-from specforge.algorithms.common.dflash_family_data import (
+from specforge.algorithms.common.hidden_states_data import (
     MTP_NORMALIZER_ID,
     build_mtp_collator,
     build_mtp_offline_normalizer,
