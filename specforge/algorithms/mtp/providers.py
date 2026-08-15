@@ -98,13 +98,14 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
     from safetensors import safe_open
 
     target_path = cfg.model.target_model_path
+    prefix = draft_model.NATIVE_KEY_PREFIX
     native_mtp: dict = {}
     scan_error = None
     try:
         for shard in sorted(glob.glob(os.path.join(target_path, "*.safetensors"))):
             with safe_open(shard, framework="pt") as handle:
                 for key in handle.keys():
-                    if key.startswith("mtp."):
+                    if key.startswith(prefix):
                         native_mtp[key] = handle.get_tensor(key)
     except Exception as exc:  # pragma: no cover - depends on target checkpoint
         scan_error = exc
@@ -112,21 +113,21 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
     if native_mtp:
         draft_model.load_state_dict(native_mtp, strict=False)
         print(
-            f"[mtp] initialized {len(native_mtp)} native mtp.* weights from "
+            f"[mtp] initialized {len(native_mtp)} native {prefix}* weights from "
             f"{target_path} (native-MTP fine-tune)."
         )
         return
 
     if cfg.model.draft_checkpoint_path:
         print(
-            f"[mtp] no native mtp.* weights in {target_path}; weights come from "
-            "the warm-start draft checkpoint."
+            f"[mtp] no native {prefix}* weights in {target_path}; weights come "
+            "from the warm-start draft checkpoint."
         )
         return
 
     detail = f" (scan failed: {scan_error})" if scan_error is not None else ""
     raise RuntimeError(
-        f"[mtp] no native mtp.* weights found in {target_path}{detail}. MTP "
+        f"[mtp] no native {prefix}* weights found in {target_path}{detail}. MTP "
         "training fine-tunes the native MTP head shipped with the target "
         "checkpoint and does not start from random initialization by default. "
         "Point model.target_model_path at a checkpoint that ships native MTP "
@@ -149,18 +150,11 @@ def _share_target_embeddings(cfg, draft_model, torch_dtype) -> None:
         dtype=torch_dtype,
         trust_remote_code=cfg.model.trust_remote_code,
     )
-    mtp_config = getattr(draft_model.config, "mtp_config", None) or {}
-    share_lm_head = bool(mtp_config.get("share_lm_head", True))
-
-    draft_model.embed_tokens.weight = target_components.embed_tokens.weight
-    draft_model.embed_tokens.requires_grad_(False)
-    if share_lm_head:
-        draft_model.mtp.lm_head.weight = target_components.lm_head.weight
-        draft_model.mtp.lm_head.requires_grad_(False)
-    print(
-        f"[mtp] shared target embed_tokens (and lm_head={share_lm_head}) with "
-        "the MTP draft model (frozen)."
+    draft_model.share_target_embeddings(
+        target_components.embed_tokens.weight,
+        lm_head_weight=target_components.lm_head.weight,
     )
+    print("[mtp] shared target embed_tokens/lm_head with the draft (frozen).")
 
 
 def build_draft(cfg, draft_config):
