@@ -120,9 +120,10 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
     if native_mtp:
         model_keys = set(draft_model.native_state_dict())
         required_keys = set(draft_model.required_native_state_keys())
+        extra_keys = set(draft_model.allowed_extra_native_state_keys())
         loaded_keys = set(native_mtp)
         missing = sorted(required_keys - loaded_keys)
-        unexpected = sorted(loaded_keys - model_keys)
+        unexpected = sorted(loaded_keys - model_keys - extra_keys)
         if missing or unexpected:
             details = []
             if missing:

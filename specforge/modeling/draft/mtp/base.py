@@ -101,5 +101,20 @@ class MTPDraftModel(nn.Module):
             required.discard(f"{self.NATIVE_KEY_PREFIX}lm_head.weight")
         return required
 
+    def allowed_extra_native_state_keys(self) -> set[str]:
+        """Native keys a merged checkpoint may carry that the draft never owns.
+
+        ``export/mtp.merge_mtp_into_base`` backfills shared embeddings into the
+        native namespace so serving can instantiate ``mtp.embed_tokens`` (and a
+        separate ``mtp.lm_head`` for untied targets).  Re-finetuning a merged
+        checkpoint must tolerate those keys instead of rejecting the
+        checkpoint as incompatible.
+        """
+        extra = {f"{self.NATIVE_KEY_PREFIX}embed_tokens.weight"}
+        mtp_config = getattr(self.config, "mtp_config", None) or {}
+        if mtp_config.get("share_lm_head", True):
+            extra.add(f"{self.NATIVE_KEY_PREFIX}lm_head.weight")
+        return extra
+
 
 __all__ = ["MTPDraftModel"]

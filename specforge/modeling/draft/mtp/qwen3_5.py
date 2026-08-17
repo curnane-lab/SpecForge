@@ -17,7 +17,7 @@ Weight key layout matches SGLang's Qwen3_5ForCausalLMMTP:
 """
 
 import copy
-from typing import Optional, Tuple, Unpack
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -33,6 +33,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     eager_attention_forward,
     rotate_half,
 )
+from typing_extensions import Unpack
 
 from specforge.modeling._mask_utils import _expand_mask, _make_causal_mask
 from specforge.modeling.draft.mtp.base import MTPDraftModel
@@ -478,10 +479,14 @@ class Qwen3_5MTPDraftModel(MTPDraftModel, Qwen3PreTrainedModel):
         output_ids = torch.cat([output_ids, next_token], dim=1)
         target_hidden = target_out.hidden_states[-1][:, -1:, :]
 
+        # Loop invariant: the target KV cache covers output_ids[:-1], and
+        # target_hidden is the post-norm hidden state at position
+        # len(output_ids)-2 (driving the draft's view of the newest token).
         while output_ids.shape[1] < max_length:
+            committed = output_ids.shape[1]
             draft_input_ids = output_ids[:, -1:]
             draft_position_ids = torch.tensor(
-                [[output_ids.shape[1] - 1]], dtype=torch.long, device=device
+                [[committed - 1]], dtype=torch.long, device=device
             )
             draft_embeds = self.embed_tokens(draft_input_ids)
             draft_hidden = self.mtp(
@@ -498,11 +503,13 @@ class Qwen3_5MTPDraftModel(MTPDraftModel, Qwen3PreTrainedModel):
                     num_samples=1,
                 )
 
-            # Verify against target
-            verify_input_ids = torch.cat([output_ids[:, -1:], draft_token], dim=1)
+            # Verify against the target. logits[:, 0] is the target's prediction
+            # for the position the draft token occupies; logits[:, -1] is already
+            # conditioned on the (possibly rejected) draft token.
+            verify_input_ids = torch.cat([draft_input_ids, draft_token], dim=1)
             verify_position_ids = torch.arange(
-                output_ids.shape[1] - 1,
-                output_ids.shape[1] + 1,
+                committed - 1,
+                committed + 1,
                 dtype=torch.long,
                 device=device,
             ).unsqueeze(0)
@@ -513,10 +520,14 @@ class Qwen3_5MTPDraftModel(MTPDraftModel, Qwen3PreTrainedModel):
                 use_cache=True,
                 output_hidden_states=True,
             )
-            target_hidden = target_out.hidden_states[-1][:, -1:, :]
             target_token = torch.argmax(
-                target_out.logits[:, -1, :], dim=-1, keepdim=True
+                target_out.logits[:, 0:1, :], dim=-1, keepdim=True
             )
+            # h at the newest committed token drives the next draft round.
+            target_hidden = target_out.hidden_states[-1][:, 0:1, :]
+            # Trim the scored draft token's KV again: wrong on rejection, and
+            # re-appended by next round's verify on acceptance.
+            past_key_values_target.crop(committed)
 
             if torch.equal(draft_token, target_token):
                 output_ids = torch.cat([output_ids, draft_token], dim=1)

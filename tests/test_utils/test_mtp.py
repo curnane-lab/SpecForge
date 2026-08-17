@@ -279,6 +279,30 @@ class NativeMTPInitTest(unittest.TestCase):
                 torch.all(value == 1), f"{key} was not loaded from native weights"
             )
 
+    def test_native_init_tolerates_merged_checkpoint_keys(self):
+        """A previously merged checkpoint carries backfilled shared embeddings
+        (mtp.embed_tokens.weight / mtp.lm_head.weight); re-finetuning it must
+        not be rejected as an incompatible native state."""
+        from safetensors.torch import save_file
+
+        config = _tiny_config()
+        draft = Qwen3_5MTPDraftModel(config)
+        state = {
+            key: torch.ones_like(value)
+            for key, value in draft.native_state_dict().items()
+            if key in draft.required_native_state_keys()
+        }
+        state["mtp.embed_tokens.weight"] = torch.randn(
+            config.vocab_size, config.hidden_size
+        )
+        state["mtp.lm_head.weight"] = torch.randn(config.vocab_size, config.hidden_size)
+
+        with tempfile.TemporaryDirectory(prefix="mtp-native-init-") as tmpdir:
+            save_file(state, f"{tmpdir}/model.safetensors")
+            _init_from_native_mtp(_cfg(tmpdir), draft)  # must not raise
+
+        self.assertTrue(torch.all(draft.mtp.fc.weight == 1))
+
 
 class DraftBaseContractTest(unittest.TestCase):
     def test_share_target_embeddings_freezes_and_shares(self):
@@ -507,6 +531,60 @@ class ExportRoundTripTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "draft_config_path is required"):
                 merge_mtp_into_base("unused", runtime, os.path.join(tmpdir, "out"))
+
+    def test_merge_runtime_checkpoint_with_shared_tied_weights(self):
+        """Regression: a tied target shares one storage between the draft's
+        embed_tokens.weight and mtp.lm_head.weight; safetensors must not choke
+        on the aliased pair when writing the merged checkpoint."""
+        from safetensors.torch import save_file
+
+        from specforge.export.mtp import merge_mtp_into_base
+        from specforge.modeling.target.checkpoint import load_selected_tensors
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = os.path.join(tmpdir, "base")
+            runtime = os.path.join(tmpdir, "run-step1")
+            out = os.path.join(tmpdir, "out")
+            draft_config = os.path.join(tmpdir, "draft-config.json")
+            os.makedirs(base)
+            os.makedirs(runtime)
+
+            save_file(
+                {"model.embed_tokens.weight": torch.randn(128, 64)},
+                os.path.join(base, "model.safetensors"),
+            )
+            with open(os.path.join(base, "config.json"), "w") as f:
+                json.dump({"hidden_size": 64, "tie_word_embeddings": True}, f)
+            with open(draft_config, "w") as f:
+                json.dump(
+                    {
+                        "architectures": ["Qwen3_5MTPDraftModel"],
+                        "hidden_size": 64,
+                        "head_dim": 16,
+                    },
+                    f,
+                )
+
+            shared = torch.randn(128, 64)
+            trained = torch.ones(64, 128)
+            torch.save(
+                {
+                    "strategy": "mtp",
+                    "draft_state_dict": {
+                        "embed_tokens.weight": shared,
+                        "mtp.lm_head.weight": shared,
+                        "mtp.fc.weight": trained,
+                    },
+                },
+                os.path.join(runtime, "training_state.pt"),
+            )
+
+            merge_mtp_into_base(base, runtime, out, draft_config_path=draft_config)
+
+            merged = load_selected_tensors(out, lambda _key: True)
+            self.assertTrue(torch.equal(merged["mtp.embed_tokens.weight"], shared))
+            self.assertTrue(torch.equal(merged["mtp.lm_head.weight"], shared))
+            self.assertTrue(torch.equal(merged["mtp.fc.weight"], trained))
 
 
 class MTPRegistrationTest(unittest.TestCase):

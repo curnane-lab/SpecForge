@@ -101,7 +101,29 @@ def convert_mtp_keys(
         else:
             new_k = k
         converted[new_k] = v
-    return converted
+    return _unshare_storage(converted)
+
+
+def _unshare_storage(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Clone tensors whose storage is aliased under another key.
+
+    A tied target shares one Parameter between ``embed_tokens.weight`` and
+    ``mtp.lm_head.weight``; after promotion both keys keep aliasing the same
+    storage, which safetensors' ``save_file`` rejects ("tensors share
+    memory").  Cloning the later alias preserves the values while giving every
+    key its own storage.
+    """
+
+    seen: set[int] = set()
+    out: Dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        ptr = value.untyped_storage().data_ptr()
+        if ptr in seen:
+            value = value.clone()
+        else:
+            seen.add(ptr)
+        out[key] = value
+    return out
 
 
 def _find_base_key(state_dict: Dict[str, torch.Tensor], *candidates: str) -> str | None:
