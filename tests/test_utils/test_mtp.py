@@ -119,6 +119,39 @@ class OnlineMTPModelTest(unittest.TestCase):
         # the padded position is masked out
         self.assertEqual([1, 1, 1, 0], shift_mask[0].tolist())
 
+    def test_forward_shifts_position_ids_with_draft_tokens(self):
+        class _RecordingDraft(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(pad_token_id=0)
+                self.position_ids = None
+
+            def forward(
+                self,
+                input_ids,
+                hidden_states,
+                attention_mask=None,
+                position_ids=None,
+            ):
+                self.position_ids = position_ids.detach().clone()
+                logits = torch.zeros(
+                    input_ids.shape[0], input_ids.shape[1], 32, requires_grad=True
+                )
+                return SimpleNamespace(logits=logits)
+
+        draft = _RecordingDraft()
+        model = OnlineMTPModel(draft)
+        model(
+            input_ids=torch.tensor([[10, 11, 12, 13]]),
+            hidden_states=torch.zeros(1, 4, 8),
+            loss_mask=torch.ones(1, 4),
+            position_ids=torch.tensor([[4, 5, 6, 7]]),
+        )
+
+        # x[t+1] is fused with h[t], but RoPE must use x[t+1]'s serving
+        # position. The synthetic final token is assigned the next position.
+        self.assertEqual([[5, 6, 7, 8]], draft.position_ids.tolist())
+
 
 class MTPTrainStrategyTest(unittest.TestCase):
     def test_forward_loss_adapts_model_outputs(self):
@@ -151,6 +184,10 @@ class MTPTrainStrategyTest(unittest.TestCase):
         num, den = out.ratio_metrics["accuracy"]
         self.assertEqual(2.0, num.item())
         self.assertEqual(3.0, den.item())
+        loss_num, loss_den = out.loss_terms
+        self.assertIsNotNone(loss_num.grad_fn)
+        self.assertEqual(4.5, loss_num.item())
+        self.assertEqual(3.0, loss_den.item())
 
     def test_forward_loss_rejects_missing_features(self):
         strategy = MTPTrainStrategy(torch.nn.Linear(1, 1))
@@ -176,12 +213,29 @@ class NativeMTPInitTest(unittest.TestCase):
         config = _tiny_config()
         draft = Qwen3_5MTPDraftModel(config)
         replacement = torch.ones_like(draft.mtp.fc.weight)
+        native_state = {
+            key: torch.ones_like(value)
+            for key, value in draft.native_state_dict().items()
+            if key in draft.required_native_state_keys()
+        }
 
         with tempfile.TemporaryDirectory(prefix="mtp-native-init-") as tmpdir:
-            save_file({"mtp.fc.weight": replacement}, f"{tmpdir}/model.safetensors")
+            save_file(native_state, f"{tmpdir}/model.safetensors")
             _init_from_native_mtp(_cfg(tmpdir), draft)
 
         self.assertTrue(torch.equal(draft.mtp.fc.weight, replacement))
+
+    def test_partial_native_weights_raise(self):
+        from safetensors.torch import save_file
+
+        draft = Qwen3_5MTPDraftModel(_tiny_config())
+        with tempfile.TemporaryDirectory(prefix="mtp-native-init-") as tmpdir:
+            save_file(
+                {"mtp.fc.weight": torch.ones_like(draft.mtp.fc.weight)},
+                f"{tmpdir}/model.safetensors",
+            )
+            with self.assertRaisesRegex(RuntimeError, "missing required native"):
+                _init_from_native_mtp(_cfg(tmpdir), draft)
 
     def test_missing_native_weights_raise_by_default(self):
         draft = Qwen3_5MTPDraftModel(_tiny_config())
@@ -206,10 +260,11 @@ class NativeMTPInitTest(unittest.TestCase):
 
         config = _tiny_config()
         draft = Qwen3_5MTPDraftModel(config)
-        native_keys = set(draft.native_state_dict())
+        native_keys = draft.required_native_state_keys()
         replacement = {
             key: torch.ones_like(value)
             for key, value in draft.native_state_dict().items()
+            if key in native_keys
         }
 
         with tempfile.TemporaryDirectory(prefix="mtp-native-init-") as tmpdir:
@@ -217,8 +272,9 @@ class NativeMTPInitTest(unittest.TestCase):
             _init_from_native_mtp(_cfg(tmpdir), draft)
 
         after = draft.native_state_dict()
-        self.assertEqual(native_keys, set(after))
-        for key, value in after.items():
+        self.assertTrue(native_keys.issubset(after))
+        for key in native_keys:
+            value = after[key]
             self.assertTrue(
                 torch.all(value == 1), f"{key} was not loaded from native weights"
             )
@@ -255,6 +311,13 @@ class DraftBaseContractTest(unittest.TestCase):
         self.assertTrue(native)
         self.assertTrue(all(key.startswith(draft.NATIVE_KEY_PREFIX) for key in native))
         self.assertIn("mtp.fc.weight", native)
+
+    def test_required_native_state_respects_shared_lm_head(self):
+        shared = Qwen3_5MTPDraftModel(_tiny_config())
+        own = Qwen3_5MTPDraftModel(_tiny_config(mtp_config={"share_lm_head": False}))
+
+        self.assertNotIn("mtp.lm_head.weight", shared.required_native_state_keys())
+        self.assertIn("mtp.lm_head.weight", own.required_native_state_keys())
 
 
 class SelectiveCheckpointLoadingTest(unittest.TestCase):
@@ -370,6 +433,80 @@ class ExportRoundTripTest(unittest.TestCase):
             with open(os.path.join(out, "config.json")) as f:
                 merged_config = json.load(f)
             self.assertEqual(16, merged_config["head_dim"])
+
+    def test_merge_accepts_runtime_training_checkpoint(self):
+        from safetensors.torch import save_file
+
+        from specforge.export.mtp import merge_mtp_into_base
+        from specforge.modeling.target.checkpoint import load_selected_tensors
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = os.path.join(tmpdir, "base")
+            runtime = os.path.join(tmpdir, "run-step1")
+            out = os.path.join(tmpdir, "out")
+            draft_config = os.path.join(tmpdir, "draft-config.json")
+            os.makedirs(base)
+            os.makedirs(runtime)
+
+            base_embed = torch.randn(128, 64)
+            save_file(
+                {
+                    "model.embed_tokens.weight": base_embed,
+                    "mtp.fc.weight": torch.zeros(64, 128),
+                },
+                os.path.join(base, "model.safetensors"),
+            )
+            with open(os.path.join(base, "config.json"), "w") as f:
+                json.dump({"hidden_size": 64, "tie_word_embeddings": True}, f)
+            with open(draft_config, "w") as f:
+                json.dump(
+                    {
+                        "architectures": ["Qwen3_5MTPDraftModel"],
+                        "hidden_size": 64,
+                        "head_dim": 16,
+                    },
+                    f,
+                )
+
+            trained = torch.ones(64, 128)
+            torch.save(
+                {
+                    "strategy": "mtp",
+                    "draft_state_dict": {"mtp.fc.weight": trained},
+                },
+                os.path.join(runtime, "training_state.pt"),
+            )
+
+            merge_mtp_into_base(
+                base,
+                runtime,
+                out,
+                draft_config_path=draft_config,
+            )
+
+            merged = load_selected_tensors(out, lambda _key: True)
+            self.assertTrue(torch.equal(merged["mtp.fc.weight"], trained))
+            self.assertTrue(torch.equal(merged["mtp.embed_tokens.weight"], base_embed))
+            with open(os.path.join(out, "config.json")) as f:
+                merged_config = json.load(f)
+            self.assertEqual(16, merged_config["head_dim"])
+
+    def test_runtime_checkpoint_requires_draft_config(self):
+        from specforge.export.mtp import merge_mtp_into_base
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = os.path.join(tmpdir, "run-step1")
+            os.makedirs(runtime)
+            torch.save(
+                {
+                    "strategy": "mtp",
+                    "draft_state_dict": {"mtp.fc.weight": torch.ones(1)},
+                },
+                os.path.join(runtime, "training_state.pt"),
+            )
+
+            with self.assertRaisesRegex(ValueError, "draft_config_path is required"):
+                merge_mtp_into_base("unused", runtime, os.path.join(tmpdir, "out"))
 
 
 class MTPRegistrationTest(unittest.TestCase):

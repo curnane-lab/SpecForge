@@ -16,7 +16,7 @@ import glob
 import json
 import os
 import shutil
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -40,17 +40,21 @@ def _default_key_candidates() -> Tuple[List[str], List[str], str]:
 
 
 def _resolve_key_candidates(
-    mtp_checkpoint_path: str,
+    draft_config_source: str,
 ) -> Tuple[List[str], List[str], str]:
     """Return (embed candidates, head candidates, native prefix) for the draft.
 
-    Reads the trained checkpoint's ``config.json`` and resolves its
+    Reads the draft ``config.json`` and resolves its
     ``architectures[0]`` through the draft registry, so each MTP family can
     override its target-side key candidates on the draft class.
     """
 
     embed, head, prefix = _default_key_candidates()
-    config_path = os.path.join(mtp_checkpoint_path, "config.json")
+    config_path = (
+        draft_config_source
+        if os.path.isfile(draft_config_source)
+        else os.path.join(draft_config_source, "config.json")
+    )
     if os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
@@ -205,26 +209,77 @@ def _load_first_checkpoint(checkpoint_dir: str) -> Dict[str, torch.Tensor]:
     raise FileNotFoundError(f"No safetensors/bin weights found in {checkpoint_dir}")
 
 
+def _has_model_weights(path: str) -> bool:
+    """Return whether ``path`` is already an exported model directory."""
+
+    if not os.path.isdir(path):
+        return False
+    patterns = ("model*.safetensors", "pytorch_model*.bin")
+    return any(glob.glob(os.path.join(path, pattern)) for pattern in patterns)
+
+
+def _load_mtp_source(
+    checkpoint_path: str,
+    draft_config_path: Optional[str],
+) -> Tuple[Dict[str, torch.Tensor], str, Optional[str]]:
+    """Load MTP weights from either runtime state or an exported draft.
+
+    Returns ``(state_dict, config_source, model_source_dir)``. The last item is
+    set only for an exported model directory, where companion modeling files
+    may also need to be copied.
+    """
+
+    path = checkpoint_path
+    if path.startswith("file://"):
+        path = path[len("file://") :]
+    if _has_model_weights(path):
+        return _load_first_checkpoint(path), path, path
+
+    from specforge.export.checkpoint_io import resolve_training_state
+
+    state = resolve_training_state(checkpoint_path)
+    if state.get("strategy") != "mtp":
+        raise ValueError(
+            "MTP merge requires a training checkpoint written by strategy='mtp'; "
+            f"got strategy={state.get('strategy')!r}"
+        )
+    draft_state = state.get("draft_state_dict")
+    if not isinstance(draft_state, dict):
+        raise ValueError("MTP training checkpoint has no draft_state_dict")
+    if not draft_config_path:
+        raise ValueError(
+            "draft_config_path is required when merging a runtime training "
+            "checkpoint"
+        )
+    if not os.path.isfile(draft_config_path):
+        raise FileNotFoundError(f"draft config not found: {draft_config_path}")
+    return dict(draft_state), draft_config_path, None
+
+
 def merge_mtp_into_base(
     base_model_path: str,
     mtp_checkpoint_path: str,
     output_path: str,
     key_format: str = "sglang",
+    *,
+    draft_config_path: Optional[str] = None,
 ) -> None:
     """Merge trained MTP weights into a copy of the base checkpoint.
 
     The output directory is a self-contained HF checkpoint loadable directly by
-    SGLang's native MTP modules (no separate draft-model path).
+    SGLang's native MTP modules (no separate draft-model path). Runtime
+    checkpoints require ``draft_config_path``; an exported HF draft supplies its
+    own ``config.json``.
     """
 
-    os.makedirs(output_path, exist_ok=True)
-    embed_key_candidates, head_key_candidates, prefix = _resolve_key_candidates(
-        mtp_checkpoint_path
+    mtp_state, config_source, model_source_dir = _load_mtp_source(
+        mtp_checkpoint_path, draft_config_path
     )
+    embed_key_candidates, head_key_candidates, prefix = _resolve_key_candidates(
+        config_source
+    )
+    os.makedirs(output_path, exist_ok=True)
 
-    # Load MTP weights. The trainer saves them as a draft_model checkpoint:
-    # model.safetensors + config.json + mtp.py.
-    mtp_state = _load_first_checkpoint(mtp_checkpoint_path)
     mtp_state = convert_mtp_keys(mtp_state, key_format, prefix)
 
     # Determine whether word embeddings are tied to decide whether a separate
@@ -272,10 +327,16 @@ def merge_mtp_into_base(
     # use these values to build the MTP module; if the base config omits
     # ``head_dim`` (common for some Qwen3.5 checkpoints), the loader will use
     # its default and fail with a shape mismatch.
-    draft_config_path = os.path.join(mtp_checkpoint_path, "config.json")
+    resolved_draft_config_path = (
+        config_source
+        if os.path.isfile(config_source)
+        else os.path.join(config_source, "config.json")
+    )
     output_config_path = os.path.join(output_path, "config.json")
-    if os.path.exists(draft_config_path) and os.path.exists(output_config_path):
-        with open(draft_config_path, "r") as f:
+    if os.path.exists(resolved_draft_config_path) and os.path.exists(
+        output_config_path
+    ):
+        with open(resolved_draft_config_path, "r") as f:
             draft_config = json.load(f)
         with open(output_config_path, "r") as f:
             base_config = json.load(f)
@@ -285,9 +346,10 @@ def merge_mtp_into_base(
 
     # Copy over the MTP modeling file if present; some loaders need it for
     # trust_remote_code / auto_map resolution.
-    mtp_py_src = os.path.join(mtp_checkpoint_path, "mtp.py")
-    if os.path.exists(mtp_py_src):
-        shutil.copy2(mtp_py_src, os.path.join(output_path, "mtp.py"))
+    if model_source_dir is not None:
+        mtp_py_src = os.path.join(model_source_dir, "mtp.py")
+        if os.path.exists(mtp_py_src):
+            shutil.copy2(mtp_py_src, os.path.join(output_path, "mtp.py"))
 
     print(f"Merged checkpoint saved to {output_path}")
     print(f"  key format: {key_format}")

@@ -84,13 +84,19 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
     """Initialize the draft's ``mtp.*`` weights from the target checkpoint.
 
     Qwen3.5-style target checkpoints ship a native MTP head whose keys match
-    the draft's flat ``mtp.*`` layout one-to-one.  Loading them turns training
+    the draft's flat ``mtp.*`` layout. The target lm_head may be shared rather
+    than duplicated under that prefix. Loading the required keys turns training
     into fine-tuning of the native head — the only training mode for this
-    algorithm.  Initialization is therefore strict by default: when no native
-    ``mtp.*`` weights exist (and no trained draft checkpoint is given),
-    construction fails rather than silently training from random
-    initialization.
+    algorithm. Initialization is strict by default: missing or partial native
+    state fails rather than silently leaving trainable tensors randomized.
     """
+
+    if cfg.model.draft_checkpoint_path:
+        print(
+            "[mtp] native target initialization skipped; weights come from the "
+            "warm-start draft checkpoint."
+        )
+        return
 
     from specforge.modeling.target.checkpoint import (
         load_selected_tensors,
@@ -112,17 +118,25 @@ def _init_from_native_mtp(cfg, draft_model) -> None:
         scan_error = exc
 
     if native_mtp:
+        model_keys = set(draft_model.native_state_dict())
+        required_keys = set(draft_model.required_native_state_keys())
+        loaded_keys = set(native_mtp)
+        missing = sorted(required_keys - loaded_keys)
+        unexpected = sorted(loaded_keys - model_keys)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing required native keys: {missing}")
+            if unexpected:
+                details.append(f"unexpected native keys: {unexpected}")
+            raise RuntimeError(
+                f"[mtp] incompatible native {prefix}* state in {target_path}: "
+                + "; ".join(details)
+            )
         draft_model.load_state_dict(native_mtp, strict=False)
         print(
             f"[mtp] initialized {len(native_mtp)} native {prefix}* weights from "
             f"{target_path} (native-MTP fine-tune)."
-        )
-        return
-
-    if cfg.model.draft_checkpoint_path:
-        print(
-            f"[mtp] no native {prefix}* weights in {target_path}; weights come "
-            "from the warm-start draft checkpoint."
         )
         return
 

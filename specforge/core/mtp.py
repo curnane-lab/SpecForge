@@ -47,9 +47,9 @@ class OnlineMTPModel(nn.Module):
         """Shift logits/labels/mask to match vLLM speculative decoding.
 
         In serving, the draft model's input_ids are the target input_ids shifted
-        right by one (draft position t sees token x_{t+1}) and it predicts the
-        token after that (x_{t+2}) using the target's post-norm hidden state at
-        position t.  Training therefore uses:
+        right by one (the draft fuses token x_{t+1} with target hidden state
+        h_t) and it predicts the token after that (x_{t+2}). Training therefore
+        uses:
           - draft input: input_ids[:, 1:]  (x_1..x_T, padded)
           - label:       x_2..x_T followed by a pad (length matches logits)
         """
@@ -96,11 +96,32 @@ class OnlineMTPModel(nn.Module):
         else:
             shifted_attention_mask = None
 
+        # Serving evaluates the shifted draft token x[t+1] at its own position
+        # p[t+1], even though it is fused with the target hidden state h[t].
+        # Preserve caller-supplied offsets (for packed/non-zero-based sequences)
+        # and give the synthetic final token the next monotonic position.
+        batch_size, seq_len = input_ids.shape
+        if position_ids is None:
+            position_ids = (
+                torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
+        elif position_ids.shape != input_ids.shape:
+            raise ValueError(
+                "position_ids must have the same [batch, seq_len] shape as "
+                f"input_ids; got {tuple(position_ids.shape)} and "
+                f"{tuple(input_ids.shape)}"
+            )
+        shifted_position_ids = torch.cat(
+            (position_ids[:, 1:], position_ids[:, -1:] + 1), dim=1
+        )
+
         outputs = self.draft_model(
             input_ids=shifted_input_ids,
             hidden_states=hidden_states,
             attention_mask=shifted_attention_mask,
-            position_ids=position_ids,
+            position_ids=shifted_position_ids,
         )
         logits = outputs.logits
 
