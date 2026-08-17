@@ -8,7 +8,8 @@ logic and the per-family key mapping live in the package.
 Example:
     python scripts/merge_mtp_to_base.py \
         --base-model-path PATH/TO/Qwen3.5-4B \
-        --mtp-checkpoint-path PATH/TO/outputs/qwen3.5-4b-mtp/epoch_0_step_X \
+        --mtp-checkpoint-path PATH/TO/outputs/qwen3.5-4b-mtp/RUN-latest \
+        --draft-config configs/qwen3.5-4b-mtp.json \
         --output-path PATH/TO/Qwen3.5-4B-MTP \
         --key-format sglang
 """
@@ -32,7 +33,19 @@ def main():
         "--mtp-checkpoint-path",
         type=str,
         required=True,
-        help="Path to a training output directory containing MTP weights.",
+        help=(
+            "SpecForge runtime checkpoint/output path, or an already-exported "
+            "HF MTP draft directory."
+        ),
+    )
+    parser.add_argument(
+        "--draft-config",
+        type=str,
+        default=None,
+        help=(
+            "Draft config JSON (required for a SpecForge runtime checkpoint; "
+            "the exported HF directory already contains config.json)."
+        ),
     )
     parser.add_argument(
         "--output-path",
@@ -59,6 +72,7 @@ def main():
         args.mtp_checkpoint_path,
         args.output_path,
         args.key_format,
+        draft_config_path=args.draft_config,
     )
 
 

@@ -87,5 +87,19 @@ class MTPDraftModel(nn.Module):
             if key.startswith(self.NATIVE_KEY_PREFIX)
         }
 
+    def required_native_state_keys(self) -> set[str]:
+        """Return native keys that must exist for safe target initialization.
+
+        A shared lm_head is deliberately reconstructed from the target model,
+        and native Qwen3.5 checkpoints do not need to duplicate it under the
+        MTP prefix. Every other native draft tensor must be present; accepting a
+        partial prefix match would leave part of the trainable head randomized.
+        """
+        required = set(self.native_state_dict())
+        mtp_config = getattr(self.config, "mtp_config", None) or {}
+        if mtp_config.get("share_lm_head", True):
+            required.discard(f"{self.NATIVE_KEY_PREFIX}lm_head.weight")
+        return required
+
 
 __all__ = ["MTPDraftModel"]

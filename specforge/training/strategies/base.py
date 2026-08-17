@@ -602,6 +602,9 @@ class MTPTrainStrategy(DraftTrainStrategy):
             loss=loss,
             metrics=metrics,
             ratio_metrics={"accuracy": (correct_sum, denom_sum)},
+            # TrainerCore backpropagates additive numerators and divides by the
+            # global token denominator across accumulation steps / DP ranks.
+            loss_terms=(loss * denom_sum, denom_sum),
         )
 
     def checkpoint_state_filter(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
