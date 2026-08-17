@@ -534,8 +534,9 @@ class ExportRoundTripTest(unittest.TestCase):
 
     def test_merge_runtime_checkpoint_with_shared_tied_weights(self):
         """Regression: a tied target shares one storage between the draft's
-        embed_tokens.weight and mtp.lm_head.weight; safetensors must not choke
-        on the aliased pair when writing the merged checkpoint."""
+        embed_tokens.weight and mtp.lm_head.weight; the merge must not crash on
+        the aliased pair, and the merged checkpoint follows the native tied
+        layout (no mtp.lm_head.weight)."""
         from safetensors.torch import save_file
 
         from specforge.export.mtp import merge_mtp_into_base
@@ -583,8 +584,58 @@ class ExportRoundTripTest(unittest.TestCase):
 
             merged = load_selected_tensors(out, lambda _key: True)
             self.assertTrue(torch.equal(merged["mtp.embed_tokens.weight"], shared))
-            self.assertTrue(torch.equal(merged["mtp.lm_head.weight"], shared))
             self.assertTrue(torch.equal(merged["mtp.fc.weight"], trained))
+            # tied serving modules reconstruct the head from mtp.embed_tokens
+            self.assertNotIn("mtp.lm_head.weight", merged)
+
+    def test_merge_keeps_lm_head_for_untied_targets(self):
+        from safetensors.torch import save_file
+
+        from specforge.export.mtp import merge_mtp_into_base
+        from specforge.modeling.target.checkpoint import load_selected_tensors
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = os.path.join(tmpdir, "base")
+            runtime = os.path.join(tmpdir, "run-step1")
+            out = os.path.join(tmpdir, "out")
+            draft_config = os.path.join(tmpdir, "draft-config.json")
+            os.makedirs(base)
+            os.makedirs(runtime)
+
+            base_head = torch.randn(128, 64)
+            save_file(
+                {
+                    "model.embed_tokens.weight": torch.randn(128, 64),
+                    "lm_head.weight": base_head,
+                },
+                os.path.join(base, "model.safetensors"),
+            )
+            with open(os.path.join(base, "config.json"), "w") as f:
+                json.dump({"hidden_size": 64, "tie_word_embeddings": False}, f)
+            with open(draft_config, "w") as f:
+                json.dump(
+                    {
+                        "architectures": ["Qwen3_5MTPDraftModel"],
+                        "hidden_size": 64,
+                        "head_dim": 16,
+                    },
+                    f,
+                )
+
+            trained = torch.ones(64, 128)
+            torch.save(
+                {
+                    "strategy": "mtp",
+                    "draft_state_dict": {"mtp.fc.weight": trained},
+                },
+                os.path.join(runtime, "training_state.pt"),
+            )
+
+            merge_mtp_into_base(base, runtime, out, draft_config_path=draft_config)
+
+            merged = load_selected_tensors(out, lambda _key: True)
+            # untied targets need (and here backfill) a separate mtp.lm_head
+            self.assertTrue(torch.equal(merged["mtp.lm_head.weight"], base_head))
 
 
 class MTPRegistrationTest(unittest.TestCase):

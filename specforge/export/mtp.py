@@ -335,6 +335,13 @@ def merge_mtp_into_base(
             prefix,
         )
 
+    if tie_word_embeddings:
+        # Tied serving modules (e.g. vLLM's Qwen3_5MultiTokenPredictor) have no
+        # lm_head parameter and reject the key; the head is reconstructed from
+        # mtp.embed_tokens.weight at load time.  This also matches the native
+        # tied checkpoint layout, which ships no mtp.lm_head.weight.
+        mtp_state.pop(head_target, None)
+
     # The generic merge machinery (copy, prefix-key replacement, shard/index
     # writing) lives in modeling/target/checkpoint.py.
     merge_state_into_checkpoint(
