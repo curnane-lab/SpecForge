@@ -88,11 +88,13 @@ def parse_arguments():
     model_group.add_argument("--model", type=str, required=True)
     model_group.add_argument(
         "--reasoning",
-        choices=["none", "save", "disable"],
+        choices=["none", "save", "disable", "raw"],
         default="none",
         help=(
             "Reasoning mode: 'none' for standard models, 'save' to store "
-            "reasoning_content, or 'disable' to disable thinking via extra_body"
+            "reasoning_content, 'disable' to disable thinking via extra_body, "
+            "or 'raw' to store the raw model output (think tags included) in "
+            "content, without server-side reasoning parsing"
         ),
     )
     model_group.add_argument(
@@ -211,7 +213,7 @@ def build_query_kwargs(args, messages, max_tokens=None):
     effective_max_tokens = max_tokens if max_tokens is not None else args.max_tokens
 
     query_messages = messages
-    if args.reasoning == "save":
+    if args.reasoning in ("save", "raw"):
         query_messages = []
         for message in messages:
             query_message = dict(message)
@@ -235,7 +237,7 @@ def build_query_kwargs(args, messages, max_tokens=None):
         extra_body["top_k"] = args.top_k
     if args.reasoning == "disable":
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
-    elif args.reasoning == "save":
+    elif args.reasoning in ("save", "raw"):
         extra_body["chat_template_kwargs"] = {"enable_thinking": True}
     if extra_body:
         query_kwargs["extra_body"] = extra_body
@@ -293,6 +295,18 @@ def call_sglang(
                     data,
                     "Non-reasoning assistant response is empty or contains a thinking marker",
                 )
+            if args.reasoning == "raw" and max_tokens is None:
+                if not isinstance(response_text, str) or not response_text.strip():
+                    return set_skipped(data, "Raw reasoning response is empty")
+                if (
+                    has_think_marker(response_text)
+                    and "</think>" not in response_text.lower()
+                ):
+                    return set_skipped(
+                        data,
+                        "Raw reasoning response has an unclosed think block "
+                        "(likely truncated at max_tokens)",
+                    )
             resp_msg = {
                 "role": "assistant",
                 "content": response_text,
