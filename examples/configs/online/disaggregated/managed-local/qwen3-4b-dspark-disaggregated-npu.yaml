@@ -6,9 +6,13 @@
 # hidden state (target_last_hidden_states) through the same capture sink.
 # Qwen3-4B is a text target: no embedding_key override and the `qwen` chat
 # template (mirrors the external qwen3-4b-dspark recipe).
+# Warm start: DeepSeek's official DSpark Qwen3-4B block7 checkpoint (backbone
+# + Markov/confidence heads); its target-copied embed/lm_head weights are
+# dropped on load. Point this at a local directory where HF is unreachable.
 model:
   target_model_path: "Qwen/Qwen3-4B"
   draft_model_config: "configs/qwen3-4b-dspark.json"
+  draft_checkpoint_path: "deepseek-ai/dspark_qwen3_4b_block7"
   target_backend: sglang
   torch_dtype: "bfloat16"
   sglang_attention_backend: ascend
