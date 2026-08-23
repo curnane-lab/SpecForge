@@ -432,12 +432,24 @@ def warm_start_draft_model(
             f"warm-start checkpoint {source!r} has incompatible draft tensor "
             f"shapes: {exc}"
         ) from exc
+    # Official DFlash-family releases (e.g. DeepSeek's DSpark checkpoints) ship
+    # target-copied embed_tokens/lm_head weights. SpecForge drafts borrow both
+    # from the frozen target at runtime instead of owning them, so these keys
+    # have no home in the draft model and are dropped with a log line.
+    ignorable_unexpected = {"embed_tokens.weight", "lm_head.weight"}
+    dropped = sorted(set(result.unexpected_keys) & ignorable_unexpected)
+    if dropped:
+        logger.info(
+            "Warm-start dropping target-owned weights the draft does not own: %s",
+            dropped,
+        )
+    unexpected = sorted(set(result.unexpected_keys) - ignorable_unexpected)
     loaded_keys = len(state) - len(result.unexpected_keys)
-    if result.unexpected_keys or loaded_keys == 0:
+    if unexpected or loaded_keys == 0:
         raise ValueError(
             f"warm-start checkpoint {source!r} does not match this draft model: "
             f"loaded={loaded_keys}/{len(state)}, "
-            f"unexpected={sorted(result.unexpected_keys)}"
+            f"unexpected={unexpected}"
         )
     allowed_missing = set()
     if allow_missing_embedding:

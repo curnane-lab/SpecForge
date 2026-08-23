@@ -409,6 +409,43 @@ class WarmStartTest(unittest.TestCase):
                     strategy="dspark",
                 )
 
+    def test_checkpoint_target_owned_weights_are_dropped(self):
+        source = _TinyDsparkDraft()
+        destination = _TinyDsparkDraft()
+        state = dict(source.state_dict())
+        state["embed_tokens.weight"] = torch.randn(4, 3)
+        state["lm_head.weight"] = torch.randn(2, 3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_runtime_state(directory, state, strategy="dspark")
+            report = warm_start_draft_model(
+                destination,
+                path,
+                draft_config=object(),
+                strategy="dspark",
+            )
+        self.assertEqual(report.loaded_keys, len(source.state_dict()))
+        self.assertTrue(
+            all(
+                torch.equal(destination.state_dict()[key], value)
+                for key, value in source.state_dict().items()
+            )
+        )
+
+    def test_unexpected_weights_outside_whitelist_fail_closed(self):
+        source = _TinyDsparkDraft()
+        destination = _TinyDsparkDraft()
+        state = dict(source.state_dict())
+        state["mystery.weight"] = torch.randn(2, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_runtime_state(directory, state, strategy="dspark")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                warm_start_draft_model(
+                    destination,
+                    path,
+                    draft_config=object(),
+                    strategy="dspark",
+                )
+
     def test_runtime_checkpoint_strategy_must_match(self):
         source = _TinyDraft()
         destination = _TinyDraft()
