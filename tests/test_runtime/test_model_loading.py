@@ -275,6 +275,14 @@ class _TinyDraft(torch.nn.Module):
         self.proj = torch.nn.Linear(3, 2)
 
 
+class _TinyDsparkDraft(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(3, 2)
+        self.markov_head = torch.nn.Linear(3, 2)
+        self.confidence_head = torch.nn.Linear(3, 1)
+
+
 class WarmStartTest(unittest.TestCase):
     def _write_runtime_state(self, directory, state, *, strategy="dflash"):
         path = os.path.join(directory, "training_state.pt")
@@ -355,6 +363,50 @@ class WarmStartTest(unittest.TestCase):
                     path,
                     draft_config=object(),
                     strategy="dflash",
+                )
+
+    def test_dspark_checkpoint_may_omit_markov_and_confidence_heads(self):
+        source = _TinyDsparkDraft()
+        destination = _TinyDsparkDraft()
+        original_markov = destination.markov_head.weight.detach().clone()
+        original_confidence = destination.confidence_head.weight.detach().clone()
+        state = {
+            key: value
+            for key, value in source.state_dict().items()
+            if not key.startswith(("markov_head.", "confidence_head."))
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_runtime_state(directory, state, strategy="dspark")
+            report = warm_start_draft_model(
+                destination,
+                path,
+                draft_config=object(),
+                strategy="dspark",
+            )
+        self.assertIn("markov_head.weight", report.missing_keys)
+        self.assertIn("confidence_head.weight", report.missing_keys)
+        self.assertTrue(torch.equal(destination.markov_head.weight, original_markov))
+        self.assertTrue(
+            torch.equal(destination.confidence_head.weight, original_confidence)
+        )
+        self.assertTrue(torch.equal(destination.proj.weight, source.proj.weight))
+
+    def test_dspark_warm_start_still_fails_closed_on_backbone_weights(self):
+        source = _TinyDsparkDraft()
+        destination = _TinyDsparkDraft()
+        state = {
+            key: value
+            for key, value in source.state_dict().items()
+            if key.startswith("markov_head.")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_runtime_state(directory, state, strategy="dspark")
+            with self.assertRaisesRegex(ValueError, "missing draft weights"):
+                warm_start_draft_model(
+                    destination,
+                    path,
+                    draft_config=object(),
+                    strategy="dspark",
                 )
 
     def test_runtime_checkpoint_strategy_must_match(self):

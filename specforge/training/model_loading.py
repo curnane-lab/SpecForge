@@ -442,6 +442,15 @@ def warm_start_draft_model(
     allowed_missing = set()
     if allow_missing_embedding:
         allowed_missing = {key for key in result.missing_keys if "embed" in key.lower()}
+    if strategy == "dspark":
+        # DSpark layers Markov/confidence heads on top of the DFlash backbone.
+        # Warm-starting from a plain DFlash-family checkpoint is supported:
+        # the heads stay at their random initialization.
+        allowed_missing |= {
+            key
+            for key in result.missing_keys
+            if key.startswith(("markov_head.", "confidence_head."))
+        }
     required_missing = sorted(set(result.missing_keys) - allowed_missing)
     if required_missing:
         raise ValueError(
