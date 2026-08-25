@@ -282,7 +282,13 @@ class OnlineDFlashModel(nn.Module):
             input_ids, anchor_positions, block_keep_mask
         )
 
-        if position_ids is None:
+        # Plain-rope drafts ignore server-produced mRoPE position_ids and stay
+        # on the same 1D convention as the text path (train/serve consistent
+        # with the plain-rope serving stacks); mRoPE drafts consume them.
+        use_server_mrope_positions = position_ids is not None and getattr(
+            self.draft_model, "use_interleaved_mrope", False
+        )
+        if not use_server_mrope_positions:
             context_position_ids = (
                 torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
             )
@@ -291,12 +297,6 @@ class OnlineDFlashModel(nn.Module):
                 [context_position_ids, draft_position_ids], dim=1
             )
         else:
-            if not getattr(self.draft_model, "use_interleaved_mrope", False):
-                raise ValueError(
-                    "multimodal capture carries mRoPE position_ids, but the "
-                    "draft config does not enable rope_scaling.mrope_interleaved; "
-                    "use a VLM draft config (e.g. configs/*-dflash-vlm-*.json)"
-                )
             # Server-produced mRoPE positions, (B, S, 3) -> (3, B, S + N*bs).
             offsets = torch.arange(self.block_size, device=device).view(1, 1, -1)
             draft_indices = (anchor_positions.unsqueeze(-1) + offsets).view(bsz, -1)

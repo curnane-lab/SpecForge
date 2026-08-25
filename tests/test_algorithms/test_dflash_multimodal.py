@@ -278,5 +278,102 @@ class MropeDraftPositionsTest(unittest.TestCase):
         self.assertEqual(full[:, 0, 6].tolist(), [6, 7, 8])
 
 
+@unittest.skipUnless(TORCH_AVAILABLE, "requires torch")
+class PlainRopePositionFallbackTest(unittest.TestCase):
+    """Plain-rope drafts ignore server mRoPE position_ids and train on the same
+    1D convention as the text path; mRoPE drafts consume them."""
+
+    def _build_model(self, use_interleaved_mrope):
+        import torch as t
+        from torch import nn
+
+        from specforge.algorithms.common.dflash_family_model import OnlineDFlashModel
+
+        class _StubDraftModel(nn.Module):
+            def __init__(self, flag):
+                super().__init__()
+                self.use_interleaved_mrope = flag
+                self.recorded = {}
+
+            def forward(
+                self,
+                position_ids=None,
+                noise_embedding=None,
+                target_hidden=None,
+                attention_mask=None,
+            ):
+                self.recorded["position_ids"] = position_ids
+                return t.zeros(1)
+
+        return OnlineDFlashModel(
+            draft_model=_StubDraftModel(use_interleaved_mrope),
+            target_lm_head=nn.Linear(8, 32, bias=False),
+            target_embed_tokens=nn.Embedding(32, 8),
+            mask_token_id=31,
+            block_size=2,
+            attention_backend="sdpa",
+            num_anchors=4,
+        )
+
+    def _inputs(self):
+        import torch as t
+
+        b, s = 2, 8
+        input_ids = t.randint(0, 31, (b, s))
+        hidden_states = t.randn(b, s, 16)
+        loss_mask = t.ones(b, s)
+        # Server-shaped mRoPE feature: (B, S, 3), offset by 100 so it is
+        # distinguishable from the 1D arange convention.
+        pos3 = (100 + t.arange(s)).view(1, s, 1).expand(b, s, 3).contiguous()
+        return input_ids, hidden_states, loss_mask, pos3
+
+    def test_plain_rope_draft_falls_back_to_1d_positions(self):
+        import torch as t
+
+        model = self._build_model(use_interleaved_mrope=False)
+        input_ids, hidden_states, loss_mask, pos3 = self._inputs()
+        t.manual_seed(0)
+        model._forward_draft_blocks(
+            input_ids, hidden_states, loss_mask, position_ids=pos3
+        )
+        got = model.draft_model.recorded["position_ids"]
+        b, s = input_ids.shape
+        self.assertEqual(got.ndim, 2)
+        self.assertTrue(
+            t.equal(got[:, :s], t.arange(s).unsqueeze(0).expand(b, -1))
+        )
+
+    def test_mrope_draft_consumes_server_positions(self):
+        import torch as t
+
+        model = self._build_model(use_interleaved_mrope=True)
+        input_ids, hidden_states, loss_mask, pos3 = self._inputs()
+        t.manual_seed(0)
+        model._forward_draft_blocks(
+            input_ids, hidden_states, loss_mask, position_ids=pos3
+        )
+        got = model.draft_model.recorded["position_ids"]
+        b, s = input_ids.shape
+        self.assertEqual(got.ndim, 3)
+        self.assertEqual(got.shape[0], 3)
+        self.assertTrue(t.equal(got[:, :, :s], pos3.permute(2, 0, 1)))
+
+    def test_none_position_ids_keeps_text_1d_path(self):
+        import torch as t
+
+        model = self._build_model(use_interleaved_mrope=True)
+        input_ids, hidden_states, loss_mask, _ = self._inputs()
+        t.manual_seed(0)
+        model._forward_draft_blocks(
+            input_ids, hidden_states, loss_mask, position_ids=None
+        )
+        got = model.draft_model.recorded["position_ids"]
+        b, s = input_ids.shape
+        self.assertEqual(got.ndim, 2)
+        self.assertTrue(
+            t.equal(got[:, :s], t.arange(s).unsqueeze(0).expand(b, -1))
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
