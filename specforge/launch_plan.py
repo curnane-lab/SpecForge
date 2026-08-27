@@ -343,30 +343,6 @@ def _disaggregated_env(
     return values
 
 
-def _device_visibility_env_var() -> str:
-    """Name of the visible-devices env var for the active accelerator.
-
-    CUDA hosts use ``CUDA_VISIBLE_DEVICES``; Ascend NPU hosts use
-    ``ASCEND_RT_VISIBLE_DEVICES``. Kept torch-free so launch planning works
-    in supervisor processes without torch: ``torch_npu`` is detected by
-    module availability (no import) after explicit env markers.
-    """
-    forced = os.environ.get("SPECFORGE_DEVICE")
-    if forced == "npu":
-        return "ASCEND_RT_VISIBLE_DEVICES"
-    if forced == "cuda":
-        return "CUDA_VISIBLE_DEVICES"
-    if os.environ.get("ASCEND_RT_VISIBLE_DEVICES") or os.environ.get(
-        "ASCEND_VISIBLE_DEVICES"
-    ):
-        return "ASCEND_RT_VISIBLE_DEVICES"
-    if os.environ.get("CUDA_VISIBLE_DEVICES"):
-        return "CUDA_VISIBLE_DEVICES"
-    if importlib.util.find_spec("torch_npu") is not None:
-        return "ASCEND_RT_VISIBLE_DEVICES"
-    return "CUDA_VISIBLE_DEVICES"
-
-
 def _managed_local_environment(cfg: Config) -> dict[str, str]:
     deployment = cfg.deployment.disaggregated
     assert deployment is not None and deployment.managed_local is not None

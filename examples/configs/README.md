@@ -461,9 +461,10 @@ unless tuning throughput or memory pressure.
   requires batch size 1.
 - `training.compact_teacher` is offline text EAGLE3 only.
 - Multimodal (image+text) training requires `training.strategy=dflash` with
-  `model.input_modality: multimodal`, a VLM draft config
-  (`configs/*-dflash-vlm-*.json`), and the v0.5.14 spec-capture patch with the
-  `position_ids` artifact. Vendor modalities such as `qwen2_5_vl` remain
+  `model.input_modality: multimodal`, a plain-rope DFlash draft config (e.g.
+  `configs/qwen3.5-4b-dflash.json`; the draft needs no mRoPE - visual
+  information arrives through the captured target hidden states), and the
+  v0.5.14 spec-capture patch. Vendor modalities such as `qwen2_5_vl` remain
   unsupported.
 - Online evaluation is not supported. Offline `data.eval_hidden_states_path`
   and `training.eval_interval` must be configured together.

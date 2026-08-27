@@ -306,7 +306,6 @@ class OnlineDFlashModel(nn.Module):
         input_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         loss_mask: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None,
         max_valid_anchors: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bsz, seq_len = input_ids.shape
@@ -323,32 +322,13 @@ class OnlineDFlashModel(nn.Module):
             input_ids, anchor_positions, block_keep_mask
         )
 
-        # Plain-rope drafts ignore server-produced mRoPE position_ids and stay
-        # on the same 1D convention as the text path (train/serve consistent
-        # with the plain-rope serving stacks); mRoPE drafts consume them.
-        use_server_mrope_positions = position_ids is not None and getattr(
-            self.draft_model, "use_interleaved_mrope", False
+        context_position_ids = (
+            torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
         )
-        if not use_server_mrope_positions:
-            context_position_ids = (
-                torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
-            )
-            draft_position_ids = self._create_position_ids(anchor_positions)
-            full_position_ids = torch.cat(
-                [context_position_ids, draft_position_ids], dim=1
-            )
-        else:
-            # Server-produced mRoPE positions, (B, S, 3) -> (3, B, S + N*bs).
-            offsets = torch.arange(self.block_size, device=device).view(1, 1, -1)
-            draft_indices = (anchor_positions.unsqueeze(-1) + offsets).view(bsz, -1)
-            draft_position_ids = torch.gather(
-                position_ids,
-                1,
-                draft_indices.unsqueeze(-1).expand(-1, -1, 3),
-            )
-            full_position_ids = torch.cat(
-                [position_ids, draft_position_ids], dim=1
-            ).permute(2, 0, 1)
+        draft_position_ids = self._create_position_ids(anchor_positions)
+        full_position_ids = torch.cat(
+            [context_position_ids, draft_position_ids], dim=1
+        )
 
         mask_builder = (
             create_dflash_block_mask
@@ -455,15 +435,10 @@ class OnlineDFlashModel(nn.Module):
         input_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         loss_mask: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None,
         max_valid_anchors: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, object]]:
         """Parallel block-wise training forward pass; returns
-        (loss, accuracy, metrics) — same shape as Domino's forward.
-
-        ``position_ids`` is the optional server-captured mRoPE position tensor
-        ``(B, S, 3)`` for multimodal runs; text runs leave it None and use
-        internally synthesized flat positions.
+        (loss, accuracy, metrics) - same shape as Domino's forward.
         """
         if self.attention_backend == "flex_attention" and not FLEX_ATTENTION_AVAILABLE:
             raise ValueError(
@@ -476,7 +451,6 @@ class OnlineDFlashModel(nn.Module):
             input_ids=input_ids,
             hidden_states=hidden_states,
             loss_mask=loss_mask,
-            position_ids=position_ids,
             max_valid_anchors=max_valid_anchors,
         )
 

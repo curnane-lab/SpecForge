@@ -13,7 +13,6 @@ from specforge.algorithms.common.hidden_states_data import (
     build_collator,
     build_offline_normalizer,
     build_offline_reader,
-    build_vlm_collator,
 )
 from specforge.algorithms.common.providers import (
     AlgorithmProviders,
@@ -94,16 +93,6 @@ def build_draft(config, draft_config):
 def build_training_model(config, draft_model, draft_config, target_config, tokenizer):
     from specforge.algorithms.model_providers import build_dflash_model
 
-    if config.model.input_modality != "text" and getattr(
-        draft_model, "use_interleaved_mrope", False
-    ):
-        raise ValueError(
-            "mRoPE drafts require the server-captured position_ids artifact, "
-            "which the v0.5.14 spec-capture patch does not currently produce "
-            "(pending re-port onto the restructured upstream sink). Use a "
-            "plain-rope draft config (e.g. configs/qwen3.5-4b-dflash.json) "
-            "for multimodal training."
-        )
     return build_dflash_model(
         config,
         draft_model,
@@ -255,7 +244,7 @@ def algorithm_providers() -> AlgorithmProviders:
                         ("loss_mask", "loss_mask", ()),
                     ),
                 ),
-                build_collator=build_vlm_collator,
+                build_collator=collator,
                 build_input_adapter=build_vlm_input_adapter,
             ),
         ),
