@@ -114,7 +114,9 @@ def _draft_config_from_dict(payload: Dict[str, Any]) -> "PretrainedConfig":
     payload["architectures"] = [architecture]
     payload["tie_word_embeddings"] = False
     payload.setdefault("use_cache", True)
-    if payload.get("draft_vocab_size") is None:
+    if "draft_vocab_size" in payload and payload["draft_vocab_size"] is None:
+        raise ValueError("draft config draft_vocab_size cannot be null")
+    if "draft_vocab_size" not in payload:
         payload["draft_vocab_size"] = payload.get("vocab_size")
     return DRAFT_REGISTRY[architecture].config_class.from_dict(payload)
 
@@ -288,11 +290,12 @@ def resolve_draft_config(
         draft_config = _generate_draft_config(cfg, provider)
 
     expected = provider.architecture
+    compatible = provider.compatible_architectures or frozenset({expected})
     architectures = list(getattr(draft_config, "architectures", None) or [])
-    if architectures != [expected]:
+    if len(architectures) != 1 or architectures[0] not in compatible:
         raise ValueError(
             f"training.strategy={cfg.training.strategy!r} requires draft "
-            f"architecture {expected}, got {architectures!r}"
+            f"architecture in {sorted(compatible)!r}, got {architectures!r}"
         )
     _apply_draft_overrides(cfg, draft_config, provider)
     return draft_config

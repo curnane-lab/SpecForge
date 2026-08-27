@@ -5,6 +5,13 @@ onto the server-only unified runtime **and implements end-to-end multimodal
 (image+text) DFlash training on top of it**. This document records what landed,
 what was deliberately not ported, and the validation status.
 
+> **Merge status (upstream main @ f072dc07)**: this branch merges cleanly with
+> upstream main. Upstream's v0.5.14 capture patch rewrote `spec_capture_sink.py`
+> (async streaming, DSpark, dynamic pinning), so the `position_ids` artifact is
+> **temporarily not produced** pending re-port onto the new sink. mRoPE drafts
+> are gated with a loud error in `build_training_model`; the plain-rope path
+> (recommended — it ignores `position_ids`) is fully functional.
+
 ## What this branch contains
 
 ### Foundation (ported from PR #585)
@@ -33,7 +40,7 @@ expands, runs the ViT, captures aux hidden states + mRoPE positions →
 Mooncake → collator → training forward with 3D position ids**.
 
 - `model.input_modality: multimodal` (DFlash only): a `FeatureContract`
-  (`{input_ids, loss_mask, hidden_states, position_ids}`) and a
+  (`{input_ids, loss_mask, hidden_states}`) and a
   `ServerStreamingProvider` with a VLM `ServerInputAdapter`
   (`specforge/algorithms/common/vlm_input.py`).
 - `specforge/data/vlm_preprocessing.py`: ShareGPT-style records with an
@@ -42,22 +49,27 @@ Mooncake → collator → training forward with 3D position ids**.
   expanded in id space, mask zeros). One image per sample max (v1); text-only
   samples work in the same run.
 - `ServerCaptureLayout.position_ids_feature` → the capture request's
-  `features["position_ids"]`; the patched server writes the request's mRoPE
-  positions `(1, L, 3) int64` into Mooncake (`_spec_capture_position_ids` in
-  the scheduler sink; text requests get the arange broadcast fallback).
-- `patches/sglang/v0.5.14/spec-capture.patch`: regenerated with the
-  `position_ids` artifact (`SpecCaptureSink.put_sample(position_ids=...)`).
+  `features["position_ids"]` — **currently unset for DFlash multimodal** (the
+  upstream sink rewrite dropped the artifact; re-port pending). The patched
+  server previously wrote the request's mRoPE positions `(1, L, 3) int64`
+  into Mooncake (`_spec_capture_position_ids` in the scheduler sink; text
+  requests get the arange broadcast fallback).
+- `patches/sglang/v0.5.14/spec-capture.patch`: now tracks upstream's rewritten
+  sink; the `position_ids` artifact (`SpecCaptureSink.put_sample(position_ids=...)`)
+  is **not in it** until the re-port lands.
   Multimodal capture requests ride the stock `input_ids` + `image_data`
   `/generate` path with `SGLANG_MM_AVOID_RETOKENIZE=1` (set by the managed
   launcher for `input_modality=multimodal`), so the server re-expands
   placeholders in id space with zero retokenization drift — and the
   passthrough/seq-len checks fail loudly if client and server expansions ever
   disagree.
-- Training: `OnlineDFlashModel.forward(..., position_ids=None)` gathers 3D
-  mRoPE positions for context + anchor-offset draft slots
-  (`(3, B, S + N·bs)`); `DFlashTrainStrategy` passes the collated
-  `position_ids` tensor through. Text runs are byte-identical to before.
-- Recipe: `examples/configs/qwen3.5-4b-vl-dflash-disaggregated.yaml`
+- Training: `OnlineDFlashModel._forward_draft_blocks` selects positions by
+  draft rope type — mRoPE drafts consume server-produced 3D positions
+  (`(3, B, S + N·bs)`); plain-rope drafts (recommended) ignore the feature and
+  use the text-path 1D `arange` convention. Multimodal + mRoPE draft raises at
+  assembly time until the `position_ids` re-port lands (see the merge-status
+  note above). Text runs are byte-identical to before.
+- Recipe: `examples/configs/online/disaggregated/external/qwen3.5-4b-vl-dflash-disaggregated.yaml`
   (single-node Ascend NPU managed stack).
 
 ## Not ported (by design)

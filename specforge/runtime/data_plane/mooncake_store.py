@@ -33,14 +33,18 @@ Contract carried from the reference backend:
 Lifetime: Mooncake's default eviction is approximate-LRU for a KV *cache*, which
 would silently drop a committed-but-unacked feature when the trainer lags hours
 (turning ``get()`` into a ``KeyError`` and violating the controller's
-no-data-loss guarantee). We therefore **hard-pin** every object on ``put`` and
-free it only by explicit ``remove()`` on consume/abort — SpecForge is the sole
-lifetime authority, not Mooncake's LRU. Because ``remove()`` is a real (fallible)
-RPC, ``release()`` parks a failed free in ``_release_pending`` and ``gc()``
-retries up to ``max_release_attempts`` during steady state. Lifecycle shutdown
-calls :meth:`drain_pending_removals`, a separate bounded retry that raises if
-physical removal never succeeds; failed hard-pinned objects are never silently
-dropped from bookkeeping.
+no-data-loss guarantee). When Mooncake exposes ``with_hard_pin``, SpecForge
+therefore **hard-pins** every object on ``put`` and frees it only by explicit
+``remove()`` on consume/abort — SpecForge is the sole lifetime authority, not
+Mooncake's LRU. Older and Ascend Mooncake clients may not expose that field; the
+store logs a warning and inherits their default pin behavior, so deployments
+that require the strict no-eviction guarantee must use a hard-pin-capable
+client. Because ``remove()`` is a real (fallible) RPC, ``release()`` parks a
+failed free in ``_release_pending`` and ``gc()`` retries up to
+``max_release_attempts`` during steady state. Lifecycle shutdown calls
+:meth:`drain_pending_removals`, a separate bounded retry that raises if physical
+removal never succeeds; failed removals are never silently dropped from
+bookkeeping.
 
 Concurrency: ``release``/``abort``/``gc`` hold ``self._lock`` across the
 ``remove()`` RPC. The lock is what makes consume-once free race-free against a
@@ -64,7 +68,14 @@ import torch
 
 from specforge.runtime.contracts import SCHEMA_VERSION, FeatureHandle, SampleRef
 from specforge.runtime.data_plane.disaggregated import AuthPolicy
-from specforge.runtime.data_plane.feature_store import FeatureStore, spec_from_tensor
+from specforge.runtime.data_plane.feature_store import (
+    DEFAULT_PENDING_DRAIN_MAX_ATTEMPTS,
+    DEFAULT_PENDING_DRAIN_RETRY_INTERVAL_S,
+    DEFAULT_SAMPLE_DRAIN_MAX_ATTEMPTS,
+    DEFAULT_SAMPLE_DRAIN_RETRY_INTERVAL_S,
+    FeatureStore,
+    spec_from_tensor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,21 +102,17 @@ class _InjectedReplicateConfig:
         self.with_soft_pin = with_soft_pin
 
 
-# Ascend selects visible NPUs through these env vars, mirroring
-# ``CUDA_VISIBLE_DEVICES``. Their presence marks a host as Ascend even before
-# ``torch_npu`` has been imported (e.g. in a capture producer that never runs
-# ``init_distributed``).
+# Ascend's CUDA_VISIBLE_DEVICES equivalent; its presence marks an Ascend
+# host even before torch_npu is imported.
 _ASCEND_VISIBLE_DEVICE_ENVS = ("ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES")
 
 
 def _ascend_runtime_available() -> bool:
-    """Report whether a usable Ascend NPU runtime is present.
+    """Whether a usable Ascend NPU runtime is present.
 
-    ``torch.npu`` only exists once ``torch_npu`` is imported, which the canonical
-    trainer does lazily inside ``init_distributed``. A disaggregated capture
-    producer skips that path, so activate ``torch_npu`` here (only on a host that
-    actually selects Ascend devices) to detect the runtime without forcing the
-    import on CUDA/CPU hosts.
+    ``torch.npu`` exists only after ``torch_npu`` is imported; do that here,
+    but only on hosts already selecting Ascend devices via env var, so the
+    import never fires on CUDA/CPU hosts.
     """
     if getattr(torch, "npu", None) is None:
         if not any(os.environ.get(name) for name in _ASCEND_VISIBLE_DEVICE_ENVS):
@@ -124,19 +131,10 @@ def _ascend_runtime_available() -> bool:
 def _bind_transport_device() -> None:
     """Bind this process's local NPU before Mooncake installs its transport.
 
-    On Ascend, ``MooncakeDistributedStore.setup()`` installs the
-    ``AscendDirectTransport``, which calls ``aclrtGetDevice`` and fails with
-    ``ACL_ERROR_RT_CONTEXT_NULL`` (107002) when no device context exists for the
-    calling process. The store is constructed at run-assembly time; a trainer
-    (consumer) has already bound its NPU in ``init_distributed``, but a capture
-    *producer* deliberately never initializes an accelerator, so the transport
-    would have no device to allocate its local segment against.
-
-    Bind only for NPU: CUDA's transport defaults to device 0 without an explicit
-    ``set_device`` and the producer intentionally avoids initializing CUDA.
-    ``_bind_local_device`` reads ``LOCAL_RANK``/``RANK`` (set by ``torchrun``), so
-    every rank pins the transport to its own NPU, and it is idempotent with the
-    trainer's earlier binding.
+    Ascend's transport calls ``aclrtGetDevice`` in ``setup()`` and fails with
+    ``ACL_ERROR_RT_CONTEXT_NULL`` when no device context exists — the case in
+    a capture producer, which never runs ``init_distributed``. No-op on CUDA,
+    where the transport defaults to device 0.
     """
     from specforge.utils import get_device_type
 
@@ -163,17 +161,12 @@ def _connect_store(setup_kwargs: Dict[str, Any]) -> Tuple[Any, Any]:
             "official wheel (`mooncake-transfer-engine` for CUDA < 13, or "
             "`mooncake-transfer-engine-cuda13` for CUDA >= 13)."
         ) from e
-    # Ascend's transport is installed inside setup() and needs a bound device
-    # context; bind the local accelerator first so the transfer engine can
-    # allocate its local segment (see _bind_transport_device).
+    # Ascend's transport needs a bound device context (see _bind_transport_device).
     _bind_transport_device()
     setup_kwargs = dict(setup_kwargs)
     if _ascend_runtime_available():
-        # AscendDirectTransport rejects the store client's wildcard-location
-        # registration of the CPU staging buffer ("location:* is not
-        # supported" -> INVALID_PARAMS). SpecForge roles are pure zero-copy
-        # clients (put_from/get_into), so force the staging buffer to 0; the
-        # store client skips registration entirely when local_buffer_size == 0.
+        # Ascend rejects the wildcard-location staging-buffer registration
+        # ("location:* is not supported"); zero-copy clients can drop it.
         setup_kwargs["local_buffer_size"] = 0
     store = MooncakeDistributedStore()
     rc = store.setup(**setup_kwargs)
@@ -232,7 +225,7 @@ def _nbytes(t: torch.Tensor) -> int:
 class MooncakeFeatureStore(FeatureStore):
     """A disaggregated :class:`FeatureStore` backed by the Mooncake store.
 
-    **Zero-copy transport.** One hard-pinned Mooncake object per
+    **Zero-copy transport.** One Mooncake object per
     *tensor*, keyed ``{store_id}/{sample_id}/g{gen}/{name}``. ``put()`` writes each
     tensor straight from its storage with ``put_from(ptr)``; ``get()`` reads each
     straight into a tensor allocated from the ref's ``FeatureSpec`` with
@@ -280,15 +273,23 @@ class MooncakeFeatureStore(FeatureStore):
         _require_store_api(store)
         self._store = store
         put_config.replica_num = replica_num
-        # Older/Ascend Mooncake builds expose no with_hard_pin on
-        # ReplicateConfig; objects then follow the store's default pin
-        # behavior until remove(). Set it only when the field exists.
+        # Prefer true hard pinning when the installed Mooncake supports it.
+        # Older ROCm builds expose only `with_soft_pin`; that is a best-effort
+        # fallback rather than the same no-eviction guarantee. Some older
+        # Ascend builds expose neither field and must use the store default.
         if hasattr(put_config, "with_hard_pin"):
             put_config.with_hard_pin = hard_pin
+        elif hasattr(put_config, "with_soft_pin"):
+            put_config.with_soft_pin = hard_pin
+            if hard_pin:
+                logger.warning(
+                    "Mooncake ReplicateConfig has no with_hard_pin field; "
+                    "falling back to with_soft_pin"
+                )
         elif hard_pin:
             logger.warning(
-                "Mooncake ReplicateConfig has no with_hard_pin field; "
-                "objects use the store's default pin behavior"
+                "Mooncake ReplicateConfig exposes neither with_hard_pin nor "
+                "with_soft_pin; objects use the store's default pin behavior"
             )
         self._put_config = put_config
         self.max_resident_bytes = max_resident_bytes
@@ -310,7 +311,7 @@ class MooncakeFeatureStore(FeatureStore):
         # Server capture registers deterministic keys before issuing HTTP. If
         # the response is lost, no SampleRef exists to adopt/abort them. Keep a
         # shared (multi-adapter) provisional index so terminal producer cleanup
-        # can reclaim those hard-pinned objects; a successful adopt clears it.
+        # can reclaim those provisional objects; a successful adopt clears it.
         self._external_provisional: Dict[Tuple[str, int], List[str]] = {}
         self._active_leases: Dict[str, FeatureHandle] = {}
         # Samples whose remote remove() failed. gc() performs bounded
@@ -341,7 +342,7 @@ class MooncakeFeatureStore(FeatureStore):
         return int(self._store.is_exist(key)) == 1
 
     def _store_put_tensor(self, key: str, t: torch.Tensor) -> None:
-        """Zero-copy publish: DMA straight from the tensor's storage, hard-pinned.
+        """Zero-copy publish, requesting a hard pin when the client supports it.
 
         ``t`` must be contiguous + CPU (caller stages it). The bytes are the raw
         tensor buffer; shape/dtype travel on the ref's FeatureSpec, so get()
@@ -394,10 +395,23 @@ class MooncakeFeatureStore(FeatureStore):
                 f"mooncake get_into short read for {key}: got {rc} of {nb} bytes"
             )
 
-    def _store_remove(self, key: str) -> bool:
-        """Best-effort physical free. Returns True on confirmed removal."""
+    def _store_remove(self, key: str, *, force: bool = False) -> bool:
+        """Best-effort physical free. Returns True on confirmed removal.
+
+        Recent Mooncake bindings expose ``remove(key, force=True)`` so a
+        lifecycle authority can reclaim an object after all application-level
+        leases have closed without waiting for Mooncake's (potentially
+        minutes-long) KV lease TTL.  Older bindings only accept ``key``; keep
+        those usable and let their normal bounded retry behavior apply.
+        """
         try:
-            rc = self._store.remove(key)
+            if force:
+                try:
+                    rc = self._store.remove(key, force=True)
+                except TypeError:
+                    rc = self._store.remove(key)
+            else:
+                rc = self._store.remove(key)
         except Exception:  # pragma: no cover - transient RPC failure
             return False
         return rc is None or int(rc) == 0
@@ -429,7 +443,8 @@ class MooncakeFeatureStore(FeatureStore):
             gen = self._gen_counter
             prior_gen = self._generation.get(sample_id)
             prior_names = self._sample_names.get(sample_id, [])
-        # One hard-pinned object per tensor, DMA'd straight from its storage.
+        # One object per tensor, DMA'd straight from its storage. The shared put
+        # config requests hard pinning when the Mooncake client supports it.
         # staged keeps the source tensors alive across the synchronous puts.
         for name, t in staged.items():
             self._store_put_tensor(self._tkey(sample_id, gen, name), t)
@@ -444,7 +459,7 @@ class MooncakeFeatureStore(FeatureStore):
             if leaked:
                 logger.warning(
                     "MooncakeFeatureStore re-put of %s gen %s: removing prior "
-                    "generation %s tensors %s failed; hard-pinned objects may be "
+                    "generation %s tensors %s failed; remote objects may be "
                     "orphaned (and the stale ref stays readable until reclaimed)",
                     sample_id,
                     prior_gen,
@@ -645,6 +660,7 @@ class MooncakeFeatureStore(FeatureStore):
         sample_id: str,
         *,
         confirm_absent_on_failure: bool = True,
+        force: bool = False,
     ) -> bool:
         """Remove all tensor objects. False on a retryable RPC failure.
 
@@ -661,7 +677,7 @@ class MooncakeFeatureStore(FeatureStore):
         ok = True
         for name in self._sample_names.get(sample_id, []):
             key = self._tkey(sample_id, gen, name)
-            if self._store_remove(key):
+            if self._store_remove(key, force=force):
                 continue
             if confirm_absent_on_failure and not self._store_exists(key):
                 continue  # already gone (freed remotely) counts as freed
@@ -716,11 +732,77 @@ class MooncakeFeatureStore(FeatureStore):
             else:
                 self._release_pending.setdefault(sample_id, 0)
 
+    def drain_sample_removals(
+        self,
+        sample_ids: List[str],
+        *,
+        max_attempts: int = DEFAULT_SAMPLE_DRAIN_MAX_ATTEMPTS,
+        retry_interval_s: float = DEFAULT_SAMPLE_DRAIN_RETRY_INTERVAL_S,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> Dict[str, int]:
+        """Force-remove only the named optimizer-durable samples.
+
+        Other pending samples may belong to prefetched, not-yet-durable
+        batches and must remain available for crash replay.
+        """
+        return self._drain_removals(
+            sample_ids=sample_ids,
+            max_attempts=max_attempts,
+            retry_interval_s=retry_interval_s,
+            sleep=sleep,
+        )
+
+    def retry_sample_removals(self, sample_ids: List[str]) -> Dict[str, Any]:
+        """Try selected removals once, without probing or sleeping.
+
+        The optimizer path calls this only for samples made durable at an
+        earlier boundary.  A failed remove remains in ``_release_pending`` for
+        the next batched attempt; avoiding ``is_exist`` here is important
+        because that probe renews Mooncake's read lease.
+        """
+        target_ids = set(sample_ids)
+        removed = removed_bytes = 0
+        with self._lock:
+            pending = [
+                sample_id
+                for sample_id in self._release_pending
+                if sample_id in target_ids
+            ]
+            for sample_id in pending:
+                physically_removed = self._try_physical_free(
+                    sample_id,
+                    force=True,
+                    confirm_absent_on_failure=False,
+                )
+                if physically_removed:
+                    sample_bytes = self._free_bookkeeping_locked(sample_id)
+                    removed += 1
+                    removed_bytes += sample_bytes
+                    self._stats["force_freed"] += 1
+                    self._stats["force_freed_bytes"] += sample_bytes
+                else:
+                    self._release_pending[sample_id] = min(
+                        self.max_release_attempts,
+                        self._release_pending.get(sample_id, 0) + 1,
+                    )
+            remaining = [
+                sample_id
+                for sample_id in self._release_pending
+                if sample_id in target_ids
+            ]
+        return {
+            "removed": removed,
+            "removed_bytes": removed_bytes,
+            "release_pending": len(remaining),
+            "remaining_ids": remaining,
+            "attempts": 1 if pending else 0,
+        }
+
     def drain_pending_removals(
         self,
         *,
-        max_attempts: int = 40,
-        retry_interval_s: float = 0.5,
+        max_attempts: int = DEFAULT_PENDING_DRAIN_MAX_ATTEMPTS,
+        retry_interval_s: float = DEFAULT_PENDING_DRAIN_RETRY_INTERVAL_S,
         sleep: Callable[[float], None] = time.sleep,
     ) -> Dict[str, int]:
         """Retry deferred removes at lifecycle shutdown or fail loudly.
@@ -732,17 +814,37 @@ class MooncakeFeatureStore(FeatureStore):
         ``sleep`` is injectable so protocol tests can advance a fake lease clock
         without wall-clock delays.
         """
+        return self._drain_removals(
+            sample_ids=None,
+            max_attempts=max_attempts,
+            retry_interval_s=retry_interval_s,
+            sleep=sleep,
+        )
+
+    def _drain_removals(
+        self,
+        *,
+        sample_ids: Optional[List[str]],
+        max_attempts: int,
+        retry_interval_s: float,
+        sleep: Callable[[float], None],
+    ) -> Dict[str, int]:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         if retry_interval_s < 0:
             raise ValueError("retry_interval_s must be >= 0")
+        target_ids = None if sample_ids is None else set(sample_ids)
         removed = removed_bytes = 0
         last_errors: Dict[str, str] = {}
         attempts_run = 0
         for attempt in range(max_attempts):
             attempts_run = attempt + 1
             with self._lock:
-                pending = list(self._release_pending)
+                pending = [
+                    sample_id
+                    for sample_id in self._release_pending
+                    if target_ids is None or sample_id in target_ids
+                ]
                 if not pending:
                     return {
                         "removed": removed,
@@ -755,6 +857,12 @@ class MooncakeFeatureStore(FeatureStore):
                     try:
                         physically_removed = self._try_physical_free(
                             sample_id,
+                            # The application lease has already been released
+                            # before a sample enters _release_pending.  Use the
+                            # lifecycle-authority path in current Mooncake so
+                            # its default multi-minute KV lease does not turn a
+                            # clean trainer shutdown into a false failure.
+                            force=True,
                             # Intermediate retries must not renew Mooncake's
                             # read lease. The final probe only classifies an
                             # already-absent key and has no following retry to
@@ -776,7 +884,11 @@ class MooncakeFeatureStore(FeatureStore):
                             self.max_release_attempts,
                             self._release_pending.get(sample_id, 0) + 1,
                         )
-                remaining = list(self._release_pending)
+                remaining = [
+                    sample_id
+                    for sample_id in self._release_pending
+                    if target_ids is None or sample_id in target_ids
+                ]
             if not remaining:
                 return {
                     "removed": removed,
@@ -788,7 +900,11 @@ class MooncakeFeatureStore(FeatureStore):
                 sleep(retry_interval_s)
 
         with self._lock:
-            remaining = list(self._release_pending)
+            remaining = [
+                sample_id
+                for sample_id in self._release_pending
+                if target_ids is None or sample_id in target_ids
+            ]
         preview = remaining[:16]
         detail = f"; last errors={last_errors}" if last_errors else ""
         raise RuntimeError(
@@ -822,7 +938,7 @@ class MooncakeFeatureStore(FeatureStore):
                     # Keep the physical key metadata and surface the pending
                     # sample. Lifecycle drain owns the final bounded retry and
                     # loud failure; silently dropping this bookkeeping would
-                    # make a hard-pinned remote leak invisible.
+                    # make a remote object leak invisible.
                     continue
                 attempts = self._release_pending[sid] + 1
                 if self._try_physical_free(sid, confirm_absent_on_failure=False):

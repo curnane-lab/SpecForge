@@ -12,11 +12,11 @@ git clone https://github.com/sgl-project/SpecForge.git
 cd SpecForge
 
 # create a new virtual environment
-uv venv -p 3.11
+uv venv -p 3.11 --seed
 source .venv/bin/activate
 
 # install specforge
-uv pip install -v . --prerelease=allow
+uv pip install -e .
 ```
 
 - **Install from PyPI**
@@ -35,27 +35,31 @@ the same `specforge train` entry.
 
 ### AMD ROCm
 
-For the pinned ROCm environment, install the checked-in requirements before the
-package:
+On ROCm, install SpecForge into an environment that already provides a ROCm
+PyTorch and a ROCm SGLang (an official SGLang ROCm release container is the
+recommended base), and install the package **without dependencies** so pip does
+not pull CUDA wheels over the working ROCm stack:
 
 ```bash
-python -m pip install -r requirements-rocm.txt
-python -m pip install -e .
+# Inside the ROCm SGLang container
+git clone https://github.com/sgl-project/SpecForge.git /workspace/SpecForge
+cd /workspace/SpecForge
+python -m pip install -e . --no-deps
 ```
 
-The file pins a ROCm 7.2 PyTorch stack. Use a wheel index and driver combination
-compatible with the host if your ROCm version differs. Online runs require a
-ROCm-compatible SGLang capture service; offline feature consumers can start
-without target inference. PyTorch exposes ROCm accelerators through its
-`torch.cuda` API and uses NCCL for distributed runs.
+For the complete container setup and an end-to-end walkthrough covering
+installation, data preparation, offline colocated training, online
+disaggregated training, and its single-supervisor and split external launch
+forms on AMD Instinct GPUs, follow the
+[AMD ROCm Tutorial](../basic_usage/AMD/amd_rocm.md).
 
 ### Ascend NPU
 
 Install the vendor-matched PyTorch and `torch_npu` packages first, then install
 SpecForge. The checked-in
-[`qwen3.5-4b-dflash-online-npu.yaml`](../../examples/configs/qwen3.5-4b-dflash-online-npu.yaml)
+[`qwen3.5-4b-dflash-online-npu.yaml`](../../examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-npu.yaml)
 and
-[`qwen3.5-4b-domino-online-npu.yaml`](../../examples/configs/qwen3.5-4b-domino-online-npu.yaml)
+[`qwen3.5-4b-domino-online-npu.yaml`](../../examples/configs/online/disaggregated/external/qwen3.5-4b-domino-online-npu.yaml)
 recipes use external SGLang server capture with SDPA consumers. Install a
 compatible SGLang/Mooncake service first. The unified launcher detects the NPU
 device, self-launches the process count recorded in YAML, and selects HCCL; see

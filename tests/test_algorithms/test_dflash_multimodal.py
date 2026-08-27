@@ -28,11 +28,13 @@ class MultimodalRegistrationTest(unittest.TestCase):
         )
         self.assertEqual(
             set(contract.required_tensors),
-            {"input_ids", "loss_mask", "hidden_states", "position_ids"},
+            {"input_ids", "loss_mask", "hidden_states"},
         )
         provider = registration.providers.server_streaming_for("multimodal")
         self.assertEqual(provider.capture_method, "dflash")
-        self.assertEqual(provider.layout.position_ids_feature, "position_ids")
+        # position_ids capture is pending re-port onto the upstream
+        # v0.5.14 capture-sink rewrite; plain-rope drafts do not consume it.
+        self.assertIsNone(provider.layout.position_ids_feature)
         self.assertEqual(provider.layout.aux_feature, "hidden_states")
 
     def test_other_builtins_have_no_multimodal_contract(self):

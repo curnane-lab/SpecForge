@@ -22,7 +22,7 @@ from specforge.algorithms.common.providers import (
 from specforge.algorithms.contracts import AlgorithmSpec, FeatureMode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUILTINS = ("dflash", "domino", "dspark", "eagle3", "peagle")
+BUILTINS = ("dflash", "domino", "dspark", "eagle3", "mtp", "peagle")
 
 
 class BuiltinProviderContractTest(unittest.TestCase):
@@ -54,6 +54,19 @@ class BuiltinProviderContractTest(unittest.TestCase):
                     ),
                 }
                 self.assertEqual(contract_keys, provider_keys)
+
+    def test_dflash_family_requires_a_trainable_block_size(self):
+        for algorithm in ("dflash", "domino", "dspark"):
+            minimum_loss_tokens = self.registry.resolve(
+                algorithm
+            ).providers.model.minimum_loss_tokens
+            with self.subTest(algorithm=algorithm):
+                self.assertEqual(
+                    minimum_loss_tokens(None, SimpleNamespace(block_size=2)),
+                    2,
+                )
+                with self.assertRaisesRegex(ValueError, "block_size >= 2"):
+                    minimum_loss_tokens(None, SimpleNamespace(block_size=1))
 
     def test_algorithm_metadata_has_no_factories_or_topology_flags(self):
         field_names = {field.name for field in fields(AlgorithmSpec)}
@@ -101,6 +114,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
         self.assertEqual(
             {
                 "architecture",
+                "compatible_architectures",
                 "target_defaults",
                 "expected_auto_map_model",
                 "apply_overrides",
@@ -135,7 +149,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
                 self.assertEqual(vocab_size, defaults.draft_vocab_size)
                 self.assertEqual(has_override, policy.apply_overrides is not None)
 
-        for name in ("domino", "dspark"):
+        for name in ("domino", "dspark", "mtp"):
             with self.subTest(algorithm=name):
                 policy = self.registry.resolve(name).providers.model.draft_config
                 self.assertIsNone(policy.target_defaults)
@@ -158,6 +172,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
     def test_builtin_resume_contracts_cover_resolved_objective_semantics(self):
         training = SimpleNamespace(
             attention_backend="flex_attention",
+            trim_loss_positions=True,
             compact_teacher=True,
             compact_teacher_chunk_size=1024,
             lambda_base_start=0.75,
@@ -201,6 +216,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
             "dflash": dflash_family,
             "domino": dflash_family,
             "dspark": dflash_family,
+            "mtp": SimpleNamespace(),
         }
         expected_keys = {
             "eagle3": {
@@ -208,6 +224,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
                 "eagle3_lk_loss_type",
                 "eagle3_kl_scale",
                 "eagle3_kl_decay",
+                "eagle3_trim_loss_positions",
                 "eagle3_compact_teacher",
             },
             "peagle": {
@@ -235,6 +252,12 @@ class BuiltinProviderContractTest(unittest.TestCase):
                 "dspark_l1_loss_alpha",
                 "dspark_confidence_head_alpha",
             },
+            "mtp": {
+                "mtp_draft_num_hidden_layers",
+                "mtp_draft_vocab_size",
+                "mtp_share_lm_head",
+                "mtp_attention_backend",
+            },
         }
 
         for name in BUILTINS:
@@ -254,6 +277,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
         config = SimpleNamespace(
             training=SimpleNamespace(
                 attention_backend="flex_attention",
+                trim_loss_positions=False,
                 compact_teacher=False,
                 compact_teacher_chunk_size=None,
             )
@@ -289,6 +313,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
             (
                 ("compact_teacher", False),
                 ("compact_teacher_chunk_size", None),
+                ("trim_loss_positions", False),
             ),
         )
         self.assertEqual(
@@ -419,7 +444,7 @@ class BuiltinProviderContractTest(unittest.TestCase):
         code = (
             "import sys; "
             "from specforge.algorithms.builtin import builtin_algorithm_registry; "
-            "r=builtin_algorithm_registry(); assert len(r)==5; "
+            "r=builtin_algorithm_registry(); assert len(r)==6; "
             "assert 'torch' not in sys.modules; "
             "assert 'specforge.training.strategies.registry' not in sys.modules"
         )

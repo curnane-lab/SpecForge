@@ -8,7 +8,7 @@ from specforge.algorithms.common.defaults import (
     empty_options,
     no_missing_checkpoint_keys,
 )
-from specforge.algorithms.common.dflash_family_data import (
+from specforge.algorithms.common.hidden_states_data import (
     NORMALIZER_ID,
     build_collator,
     build_offline_normalizer,
@@ -36,6 +36,7 @@ from specforge.algorithms.contracts import (
     FeatureMode,
     OfflineStorageContract,
 )
+from specforge.data.loss_mask import has_consecutive_supervised_tokens
 
 ALGORITHM_NAME = "dflash"
 DRAFT_ARCHITECTURE = "DFlashDraftModel"
@@ -93,6 +94,16 @@ def build_draft(config, draft_config):
 def build_training_model(config, draft_model, draft_config, target_config, tokenizer):
     from specforge.algorithms.model_providers import build_dflash_model
 
+    if config.model.input_modality != "text" and getattr(
+        draft_model, "use_interleaved_mrope", False
+    ):
+        raise ValueError(
+            "mRoPE drafts require the server-captured position_ids artifact, "
+            "which the v0.5.14 spec-capture patch does not currently produce "
+            "(pending re-port onto the restructured upstream sink). Use a "
+            "plain-rope draft config (e.g. configs/qwen3.5-4b-dflash.json) "
+            "for multimodal training."
+        )
     return build_dflash_model(
         config,
         draft_model,
@@ -134,7 +145,6 @@ def needs_input_tools(config, draft_model):
 
 def algorithm_spec() -> AlgorithmSpec:
     ready = {"input_ids", "loss_mask", "hidden_states"}
-    vlm_ready = {"input_ids", "loss_mask", "hidden_states", "position_ids"}
     return AlgorithmSpec(
         name=ALGORITHM_NAME,
         draft=DraftRequirement(
@@ -161,7 +171,7 @@ def algorithm_spec() -> AlgorithmSpec:
             FeatureContract(
                 mode=FeatureMode.STREAMING,
                 modality="multimodal",
-                required_tensors=vlm_ready,
+                required_tensors=ready,
             ),
         ),
         capabilities=AlgorithmCapabilities(
@@ -198,6 +208,7 @@ def algorithm_providers() -> AlgorithmProviders:
             minimum_loss_tokens=minimum_loss_tokens,
             needs_input_tools=needs_input_tools,
             default_dataloader_num_workers=8,
+            loss_mask_filter=has_consecutive_supervised_tokens,
         ),
         offline=(
             OfflineDataProvider(
@@ -243,7 +254,6 @@ def algorithm_providers() -> AlgorithmProviders:
                         ("input_ids", "input_ids", ()),
                         ("loss_mask", "loss_mask", ()),
                     ),
-                    position_ids_feature="position_ids",
                 ),
                 build_collator=build_vlm_collator,
                 build_input_adapter=build_vlm_input_adapter,
