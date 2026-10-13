@@ -647,6 +647,12 @@ def build_training_run(
             use_usp_preprocess=(t.attention_backend == "usp"),
             seed=t.seed,
             resume_from=t.resume_from,
+            scratch_online=cfg.data.scratch_online,
+            scratch_expected_samples=cfg.data.scratch_expected_samples,
+            scratch_file_group_size=cfg.data.scratch_file_group_size,
+            scratch_poll_interval_s=cfg.data.scratch_poll_interval_s,
+            scratch_file_timeout_s=cfg.data.scratch_file_timeout_s,
+            scratch_delete_after_read=cfg.data.scratch_delete_after_read,
             **_common_launch_kwargs(
                 cfg,
                 bundle,

@@ -424,6 +424,36 @@ class DataConfig(StrictConfigModel):
     cache_dir: str = "./cache"
     cache_key: Optional[str] = None
     max_prompts: Optional[int] = Field(default=None, ge=0)
+    #: Scratch-online mode: data.hidden_states_path names a live scratch
+    #: directory filled on demand by scripts/online_capture_producer.py
+    #: (windowed file protocol) instead of a precomputed dataset. The reader
+    #: waits for each file; the store deletes it after reading, bounding disk
+    #: usage to the producer's --scratch-window. Requires sequential sampling
+    #: (forced) and full consumption (batch_size == 1 or
+    #: scratch_expected_samples % batch_size == 0).
+    scratch_online: bool = False
+    #: Number of samples the producer generates per epoch (index range).
+    scratch_expected_samples: Optional[int] = Field(default=None, ge=1)
+    #: Must match the producer's --file-group-size (grouped dir layout).
+    scratch_file_group_size: int = Field(default=2000, ge=1)
+    scratch_poll_interval_s: float = Field(default=1.0, gt=0)
+    scratch_file_timeout_s: float = Field(default=600.0, gt=0)
+    scratch_delete_after_read: bool = True
+
+    @model_validator(mode="after")
+    def _scratch_online_requires_source(self):
+        if self.scratch_online:
+            if not self.hidden_states_path:
+                raise ValueError(
+                    "data.scratch_online requires data.hidden_states_path "
+                    "(the scratch directory)"
+                )
+            if self.scratch_expected_samples is None:
+                raise ValueError(
+                    "data.scratch_online requires data.scratch_expected_samples "
+                    "(the producer's per-epoch sample count)"
+                )
+        return self
 
     @model_validator(mode="after")
     def _exactly_one_source(self):

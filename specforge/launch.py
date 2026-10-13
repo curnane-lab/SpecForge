@@ -571,12 +571,24 @@ def build_offline_runtime(
     strategy_kwargs: Optional[Mapping[str, Any]] = None,
     dataloader_num_workers: int = 0,
     profiling_options=None,
+    scratch_online: bool = False,
+    scratch_expected_samples: Optional[int] = None,
+    scratch_file_group_size: int = 2000,
+    scratch_poll_interval_s: float = 1.0,
+    scratch_file_timeout_s: float = 600.0,
+    scratch_delete_after_read: bool = True,
 ):
     """Assemble the colocated offline dataflow (``LocalFeatureStore``).
 
     ``draft_model`` is the composite model for ``algorithm`` and must expose its
     trainable module as ``.draft_model``. Colocated offline refs are fixed and
     re-iterable, so this path does not allocate a training ledger or ref queue.
+
+    With ``scratch_online`` the hidden-states path is a live scratch directory
+    filled on demand by ``scripts/online_capture_producer.py``: refs are
+    emitted by index without touching the filesystem, the store waits for each
+    file and deletes it after reading, and sampling is forced sequential (the
+    producer's window protocol requires in-order consumption).
     """
     _validate_offline_trainer_tp(tp_size)
     provider = algorithm.providers.offline_for(modality)
@@ -592,9 +604,22 @@ def build_offline_runtime(
         metadata_store=NoOpMetadataStore(),
         enable_sample_queue=False,
     )
-    source_refs = provider.build_reader(
+    base_reader = provider.build_reader(
         hidden_states_path, run_id=run_id, ttt_length=ttt_length, max_len=max_len
-    ).read()
+    )
+    if scratch_online:
+        from specforge.runtime.data_plane.scratch_online import (
+            ScratchFileFeatureStore,
+            ScratchOnlineReader,
+        )
+
+        source_refs = ScratchOnlineReader(
+            base_reader,
+            expected_samples=scratch_expected_samples,
+            file_group_size=scratch_file_group_size,
+        ).read()
+    else:
+        source_refs = base_reader.read()
 
     def refs_for_epoch(epoch):
         return _shard_offline_refs(
@@ -602,10 +627,19 @@ def build_offline_runtime(
             use_usp_preprocess=use_usp_preprocess,
             seed=seed,
             epoch=epoch,
+            shuffle=not scratch_online,
         )
 
     refs = refs_for_epoch(0)
-    store = LocalFeatureStore(run_id)
+    if scratch_online:
+        store = ScratchFileFeatureStore(
+            run_id,
+            poll_interval_s=scratch_poll_interval_s,
+            file_timeout_s=scratch_file_timeout_s,
+            delete_after_read=scratch_delete_after_read,
+        )
+    else:
+        store = LocalFeatureStore(run_id)
     if eval_hidden_states_path:
         if eval_data_factory is not None:
             raise ValueError(
