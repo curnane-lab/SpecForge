@@ -13,9 +13,10 @@ Date: 2026-10-12. Hardware: Ascend 910B3, bf16, greedy, single card per server.
   (`sglang-qwen3.5`) predates that fix and yields materially lower accept lengths for
   ANY draft (see §5).
 
-All artifacts were under `/data1/f00538480/hspec-verify/e2e/` (scripts, configs, logs,
-checkpoints); the directory was deleted in a shared-disk cleanup on 2026-10-13, so this
-document is now the canonical record of the numbers.
+All 2K-era artifacts were under `/data1/f00538480/hspec-verify/e2e/` (scripts, configs, logs,
+checkpoints); the directory was deleted in a shared-disk cleanup on 2026-10-13. The 10K-era
+artifacts (§6) live in `/data1/f00538480/hspec-verify/scratch_10k/` and are still on disk
+(captures, checkpoints, eval configs/logs, serving results).
 
 ## 1. Pipeline (what was run)
 
@@ -136,3 +137,96 @@ the topology fix; the failing tests are pre-existing environment issues on this 
 - Environment: capture needs sglang main ≥ 2026-09-21 (970e946e4f); 0.5.19 release lacks it.
 - Checkpoint size: SpecForge writes 9.1 GB per checkpoint (7.8 GB rank-0 optimizer state);
   plan disk or prune `training_state_rank0.pt` for non-resume artifacts.
+
+## 6. 10K scratch-online run (2026-10-13, commit 43fbe62)
+
+Same warm-start recipe, scaled 2k → 10K samples, with the offline pre-capture stage
+replaced by **scratch-online capture**: a producer process generates hidden states
+through a windowed file protocol (window 128, tmp+rename atomic publish, backpressure
+when the unconsumed backlog reaches the window) while the 3-rank FSDP trainer consumes
+and deletes them. No full-corpus capture lands on disk; window disk ceiling ≈ 12-16 GB.
+
+Setup: 9999 ShareGPT samples (first 9999 loss-mask-eligible of 11000; 3-multiple to avoid
+DP=3 padding-deadlock), 1 epoch = 3333 steps, warm-start from the official drafter,
+same LR recipe as §1. Checkpoints at step 1500 / 3000 / 3333.
+
+### 6.1 Training-side frozen eval — held-out (192 unseen ShareGPT captures, zero overlap)
+
+| checkpoint | samples seen | τ_probabilistic | teacher_agree | acc | walk_acc_len |
+|---|---|---|---|---|---|
+| official (no training) | 0 | 1.216 | 0.233 | 0.210 | 1.356 |
+| step1500 | ~4.5k | 3.251 | 0.488 | 0.445 | 2.835 |
+| step3000 | ~9k | 3.443 | 0.516 | 0.464 | 2.973 |
+| step3333 | 10k | 3.443 | 0.516 | 0.463 | 2.977 |
+
+**+183% τ over the official drafter on in-distribution data.** Saturates at ~9k samples.
+
+### 6.2 Training-side frozen eval — train-seen (192 samples drawn from the training range)
+
+Evenly spaced (stride 49) over the 9999 trained samples; each seen exactly once (1 epoch).
+Overfitting check, same protocol as 6.1:
+
+| eval set | official τ | 10K (step3333) τ | 10K teacher_agree | 10K acc |
+|---|---|---|---|---|
+| held-out (unseen) | 1.216 | 3.443 | 0.516 | 0.463 |
+| train-seen | 1.202 | **3.720** | 0.563 | 0.508 |
+
+Seen vs unseen gap for the trained drafter is only **+8%** (3.720 vs 3.443) — the gain is
+in-distribution generalization, not memorization. The official drafter is flat across the
+two sets (1.216 / 1.202), confirming both sets are equally difficult and the comparison
+is fair.
+
+### 6.3 Serving A/B — Spec-Bench + HumanEval (thinking on, max 512, PR head dd2c58f7)
+
+| task | official τ | 10K-trained τ | 10K/official |
+|---|---|---|---|
+| Math | 4.367 | 3.336 | 76.4% |
+| QA | 2.984 | 2.325 | 77.9% |
+| Chat | 2.744 | 2.101 | 76.6% |
+| RAG | 3.115 | 2.451 | 78.7% |
+| Summarization | 2.582 | 2.082 | 80.6% |
+| Translation | 2.595 | 2.276 | 87.7% |
+| Code (HumanEval) | 3.457 | 2.753 | 79.6% |
+| **avg** | **3.121** | **2.475** | **79.3%** |
+
+Adding data 2k → 10k did NOT move serving τ (2.417 → 2.475, within noise) — consistent
+with §3's "data-limited" finding, but the limiting factor is the data *kind*, not volume.
+
+### 6.4 Serving A/B — prompts from the training set (thinking OFF, max 512)
+
+200 prompts = first user turn of the same train-seen samples used in §6.2; both drafters
+served on the same PR-head build, measured by the same harness
+(`scratch_10k/run_tau_eval_sg.py`, `tau_sg_{official,10k}.json`):
+
+| prompt source | official τ | 10K-trained τ | 10K/official |
+|---|---|---|---|
+| Spec-Bench, thinking on (§6.3) | 3.121 | 2.475 | 79.3% |
+| ShareGPT train-seen, thinking off | **2.557** | 2.207 | **86.3%** |
+
+Moving to training-distribution prompts narrows the gap (79.3% → 86.3%) but does NOT
+flip it — the official drafter still wins serving-side on our own training prompts.
+
+### 6.5 Conclusion: the response side is what matters
+
+All four measurements line up behind one explanation:
+
+| evaluation | response distribution | official τ | 10K τ | winner |
+|---|---|---|---|---|
+| teacher-forced (§6.1/6.2) | ShareGPT victim responses (what we trained on) | 1.22 | 3.44–3.72 | 10K, ~3x |
+| serving, ShareGPT prompts (§6.4) | target's own generations | 2.56 | 2.21 | official |
+| serving, Spec-Bench (§6.3) | target's own generations, thinking style | 3.12 | 2.48 | official, wider margin |
+
+- Training is teacher-forced on **victim responses** (third-party answers in ShareGPT);
+  the drafter learns to continue *those*. Serving is free-running: the target answers in
+  **its own words**, a distribution our drafter never saw.
+- The official drafter's corpus (Magpie/UltraChat) has responses **generated by the target
+  model family itself** — i.e. its training distribution ≈ the serving distribution.
+  One epoch of victim-data fine-tuning pulls the warm-started drafter *away* from that
+  distribution, which is exactly why serving τ drops to ~79-86% of official.
+- The pipeline itself is sound (lossless serving, 84/84 key-identical warm start,
+  teacher-forced metrics improve 3x); the data recipe is the gap.
+
+**Fix path**: keep the prompts, replace the responses with the target model's own
+generations (Magpie-style self-distillation: sample Qwen3-4B answers to the ShareGPT
+prompts, capture hiddens on those, warm-start train). That aligns training and serving
+distributions by construction and is expected to flip the serving A/B.
