@@ -1,0 +1,43 @@
+# N2 offline leg: train the DFlash draft from .ckpt feature files produced by
+# scripts/npu/offline_roundtrip.py (plugin capture -> Mooncake -> CPU client ->
+# file). Mirrors the online smoke's training section exactly so per-step
+# losses can be compared between the two routes on identical features.
+# Run with ASCEND_RT_VISIBLE_DEVICES pointed at a free card.
+model:
+  target_model_path: "/data1/f00538480/Qwen3.5-4B"
+  draft_model_config: "/data1/f00538480/specforge-npu-capture/configs/qwen3.5-4b-dflash.json"
+  target_backend: sglang
+  trust_remote_code: true
+  embedding_key: "model.language_model.embed_tokens.weight"
+  torch_dtype: "bfloat16"
+data:
+  hidden_states_path: "/data1/f00538480/specforge-npu-capture/scripts/npu/smoke/offline_features"
+  max_length: 1024
+  chat_template: "qwen3.5"
+  cache_dir: "/data1/f00538480/specforge-npu-capture/scripts/npu/smoke/cache"
+training:
+  strategy: "dflash"
+  num_epochs: 1
+  max_steps: 8
+  batch_size: 1
+  accumulation_steps: 1
+  learning_rate: 0.0006
+  warmup_ratio: 0.04
+  max_grad_norm: 1
+  attention_backend: "sdpa"
+  num_anchors: 64
+  loss_decay_gamma: 7
+  save_interval: 4
+  log_interval: 1
+  dist_timeout: 60
+  seed: 42
+tracking:
+  report_to: "none"
+run_id: "qwen3.5-4b-dflash-npu-offline"
+output_dir: "/data1/f00538480/specforge-npu-capture/scripts/npu/smoke/outputs-offline"
+
+deployment:
+  mode: local_colocated
+  trainer:
+    nnodes: 1
+    nproc_per_node: 1

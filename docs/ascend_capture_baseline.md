@@ -54,6 +54,12 @@ Verified against the fork source, not just symbols:
 | N0 exit 3: prefill graph lifecycle (`scripts/npu/verify_capture_graph_lifecycle.py`, `cuda_graph_backend_prefill=breakable` + explicit `cuda_graph_bs_prefill=[64,128,512]`, radix cache off so the repeat capture really re-prefills) | passed (`VERIFY_GRAPH_OK`). Boot log shows `Capturing prefill shape` and prefill batches report `npu graph: True`, so a replay really happened. Capture request A followed by an interleaved burst and a repeat A2: A's aux rows match the eager reference (rel 5.7e-3..1.2e-2, cos 0.99994+), and A2 is bit-identical to A — later replays do not corrupt a drained capture. Decode graphs also capture and run on this stack (bs 1..64) |
 | N0 numerics at TP2 (`verify_capture_numerics.py ... 2`, cards 3+4, deferred-allreduce capture path) | passed (`VERIFY_OK`): same L+1 output-residual convention (cos 0.99993..0.99998), post-norm final hidden (cos 0.999951), greedy token matches HF; no duplicate-writer or row-mixing symptoms at TP2 |
 | N2 training-step smoke: one-command managed-local stack (`scripts/npu/smoke/qwen3.5-4b-dflash-npu-smoke.yaml`: mooncake master + capture server on physical card 1 with `SPECFORGE_SPEC_CAPTURE=1`, producer, single-rank DFlash trainer on physical card 2; pre-tokenized 8-sample dataset from `scripts/npu/smoke/gen_smoke_dataset.py`; random-init draft from `configs/qwen3.5-4b-dflash.json`) | passed (`EXIT=0`). Server logged `SpecForge spec capture enabled (host publication, writer=True)`; producer published 8/8 refs with no failures; trainer consumed in lease order (per-rank inbox `.consumed_count` = 3, one sample per step) and completed 3 DFlash steps with finite loss (12.69 / 17.13 / 12.44, the expected random-init scale ~ln(vocab)) and live teacher-agreement metrics; control plane closed cleanly (`.closed`, `.consumer_done`, no `.failed`). Functional smoke only — loss quality is not a draft-quality claim |
+| N2 offline round-trip (#1064 semantics, plugin → Mooncake → CPU client → offline `.ckpt` files; `scripts/npu/offline_roundtrip.py`, layers `[1,8,15,22,29]` from the draft config) | passed (`VERIFY_OFFLINE_ROUNDTRIP_OK`). 8/8 samples captured through the real plugin path, read back over TCP, persisted as offline-schema files; reloading each file reproduces the Mooncake bytes exactly. Found operational requirement: Mooncake rejects overlapping registered regions (`-600`), so a raw client must `unregister_buffer` after every `get_into` — torch's caching allocator reuses freed addresses |
+| N2 offline training from the round-trip files (`scripts/npu/smoke/qwen3.5-4b-dflash-npu-offline.yaml`, local_colocated, single NPU) | passed: 8 steps, finite loss, `.ckpt` schema accepted by the DFlash offline reader as-is |
+| Offline route determinism | bit-identical rerun: two full 8-step offline runs produce exactly equal per-step losses |
+| Checkpoint resume (offline route) | passed bit-exact: run to step 8 uninterrupted vs `training.resume_from` the step-4 checkpoint of a completed run — resumed steps 5–8 losses equal the uninterrupted run's to the last bit (optimizer/RNG/sample position fully restored; no repeated or corrupted samples) |
+| Fixed-data loss equivalence, online route vs offline route | passed **bit-identical at every step** (8/8 steps, rel diff 0.0) once the consumption order is aligned. Two orderings exist upstream and they differ for the same seed: the online producer consumes in `random.Random(training.seed + epoch)` shuffle order, the offline trainer in `torch.randperm(seed + epoch)` (DistributedSampler) order. With the offline file order realigned so both paths consume `[3,4,6,7,2,5,0,1]`, and the features being the capture server's own Mooncake bytes (`scripts/npu/server_capture_to_files.py` replays the managed server's argv and the producer's shuffled batch), every per-step loss matches `0.0000%`. Draft init is also bit-identical across both paths (probe: SHA-256 over all named parameters equal, `81a08985…`; probe reverted after use) |
+| Capture numerics envelope (same model/prompts, different capture arrangements) | server (launch_server, batched 8-seq prefill) vs in-process Engine: 4/8 samples bit-identical, the rest rel ≤ 9.8e-3 (bf16 intra-batch arrangement noise) with ≤ 0.02pp loss impact per step; serial vs batched prefill: rel ≈ 1.2e-2, ≤ 0.8% loss impact; `page_size` 64 vs 128: bit-identical. All far below semantic error (a layer permutation would leave loss flat at ~ln(vocab)) |
 
 Platform notes:
 
@@ -132,8 +138,20 @@ profiling data picks them.
    stack ran end-to-end (plugin capture server + producer + single-rank DFlash
    trainer on real NPU cards) with a random-init draft; 3 steps, finite loss,
    clean lifecycle (see the verification log and
-   `docs/ascend_capture_migration.md`). A fixed-data loss/gradient comparison
-   and the offline (#1064) round-trip remain open.
+   `docs/ascend_capture_migration.md`).
+6. ~~Fixed-data loss/gradient comparison and offline round-trip~~ — done (N2):
+   the offline (#1064-semantics) round-trip writes `.ckpt` features the DFlash
+   offline reader consumes directly; offline training is deterministic
+   (bit-identical rerun), checkpoint resume reproduces the uninterrupted
+   trajectory bit-exactly, and with consumption order aligned the online and
+   offline routes produce **bit-identical per-step losses** on the server's own
+   captured bytes. Note the upstream asymmetry this surfaced: online consumes
+   in `random.Random(seed + epoch)` order, offline in `torch.randperm(seed +
+   epoch)` order — same seed, different order.
+
+Still open (beyond N2 scope): EAGLE3/DSPARK route validation (DFlash only
+here), a real draft quality run, TP2 end-to-end training, and the profiling
+pass that decides N3/N4/N5.
 
 ## Rollback
 

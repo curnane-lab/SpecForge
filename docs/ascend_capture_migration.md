@@ -61,6 +61,12 @@ Record your own combination the same way before cutting over.
   `bin/`).
 - `managed_local` refuses a non-empty `control_dir`; delete the previous
   run's output directory before relaunching.
+- Raw Mooncake clients must pair every `register_buffer` with
+  `unregister_buffer` after the transfer completes: the engine rejects
+  overlapping registered regions (`-600`), and torch's caching allocator
+  reuses freed buffer addresses, so a leaked registration breaks later reads
+  on unrelated buffers. (`SpecForge`'s own data plane already does this; the
+  pitfall bites hand-rolled readers.)
 
 ## Migration procedure
 
@@ -106,10 +112,26 @@ All of the following must pass on the same pinned combination:
 - `verify_mooncake_e2e.py` and `verify_trainer_consume.py` (bit-identical aux
   through Mooncake; release → `KeyError`).
 - Training smoke: ≥3 DFlash steps, finite loss, control-plane artifacts
-  (`.consumed_count`, no `.failed`) consistent.
+  (`.consumed_count`, no `.failed`) consistent. On the validated combination
+  this passes end-to-end (`scripts/npu/smoke/qwen3.5-4b-dflash-npu-smoke.yaml`).
+- Offline round-trip (#1064 semantics): capture through the plugin server,
+  read back over Mooncake, persist `.ckpt` files, train from them
+  (`scripts/npu/offline_roundtrip.py` + `qwen3.5-4b-dflash-npu-offline.yaml`).
+  On the validated combination this passes, the offline route is
+  bit-deterministic across reruns, checkpoint resume reproduces the
+  uninterrupted trajectory bit-exactly, and the online and offline routes give
+  bit-identical per-step losses on identical bytes in identical order.
 - Same-sample comparison between the legacy route's output and the native
   route's capture (ordered layers, token rows, shape/dtype, training-input
   semantics).
+
+**Ordering asymmetry to know before comparing runs.** The online producer
+consumes prompts in `random.Random(training.seed + epoch)` shuffle order; the
+offline trainer consumes feature files in `torch.randperm(seed + epoch)`
+(DistributedSampler) order. The same seed therefore yields *different*
+per-step sample orders across the two routes; per-step loss comparisons must
+realign order first (or compare loss multisets). This is an upstream behavior
+note, not an NPU defect.
 
 ## Rollback
 
