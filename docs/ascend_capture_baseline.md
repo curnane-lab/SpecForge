@@ -53,6 +53,7 @@ Verified against the fork source, not just symbols:
 | N0 exit 2 (numeric half): captured aux rows vs an HF fp32 CPU reference forward (`scripts/npu/verify_capture_numerics.py`, same prompt, capture-ON engine rows via `return_hidden_states=True` under `return_hidden_states_mode=full`) | passed (`VERIFY_OK`). Empirically established capture convention on this fork: **the aux chunk for requested layer L is that layer's completed *output* residual** (matches HF `hidden_states[L+1]`), not the layer input — chunk rel-err 5e-3..1e-2, cos 0.99994..0.99999 vs fp32 reference, and each neighbor-layer offset is 30-100x worse, so the layer order is unambiguous. Final hidden rows match HF post-norm (`cos=0.999957`; pre-norm neighbor 0.51), and the engine's greedy next token (id 11751) equals the HF top-1, so the no-softcap/no-muP lm_head contract reproduces |
 | N0 exit 3: prefill graph lifecycle (`scripts/npu/verify_capture_graph_lifecycle.py`, `cuda_graph_backend_prefill=breakable` + explicit `cuda_graph_bs_prefill=[64,128,512]`, radix cache off so the repeat capture really re-prefills) | passed (`VERIFY_GRAPH_OK`). Boot log shows `Capturing prefill shape` and prefill batches report `npu graph: True`, so a replay really happened. Capture request A followed by an interleaved burst and a repeat A2: A's aux rows match the eager reference (rel 5.7e-3..1.2e-2, cos 0.99994+), and A2 is bit-identical to A — later replays do not corrupt a drained capture. Decode graphs also capture and run on this stack (bs 1..64) |
 | N0 numerics at TP2 (`verify_capture_numerics.py ... 2`, cards 3+4, deferred-allreduce capture path) | passed (`VERIFY_OK`): same L+1 output-residual convention (cos 0.99993..0.99998), post-norm final hidden (cos 0.999951), greedy token matches HF; no duplicate-writer or row-mixing symptoms at TP2 |
+| N2 training-step smoke: one-command managed-local stack (`scripts/npu/smoke/qwen3.5-4b-dflash-npu-smoke.yaml`: mooncake master + capture server on physical card 1 with `SPECFORGE_SPEC_CAPTURE=1`, producer, single-rank DFlash trainer on physical card 2; pre-tokenized 8-sample dataset from `scripts/npu/smoke/gen_smoke_dataset.py`; random-init draft from `configs/qwen3.5-4b-dflash.json`) | passed (`EXIT=0`). Server logged `SpecForge spec capture enabled (host publication, writer=True)`; producer published 8/8 refs with no failures; trainer consumed in lease order (per-rank inbox `.consumed_count` = 3, one sample per step) and completed 3 DFlash steps with finite loss (12.69 / 17.13 / 12.44, the expected random-init scale ~ln(vocab)) and live teacher-agreement metrics; control plane closed cleanly (`.closed`, `.consumer_done`, no `.failed`). Functional smoke only — loss quality is not a draft-quality claim |
 
 Platform notes:
 
@@ -127,6 +128,12 @@ profiling data picks them.
    `MooncakeFeatureStore` receive + H2D baseline + release lifecycle. Still
    open: a real training-step smoke needs draft weights (out of scope for
    N0); the migration doc and offline round-trip remain N2 work.
+5. ~~Training-step smoke~~ — done as N2 work on this branch: the managed-local
+   stack ran end-to-end (plugin capture server + producer + single-rank DFlash
+   trainer on real NPU cards) with a random-init draft; 3 steps, finite loss,
+   clean lifecycle (see the verification log and
+   `docs/ascend_capture_migration.md`). A fixed-data loss/gradient comparison
+   and the offline (#1064) round-trip remain open.
 
 ## Rollback
 
