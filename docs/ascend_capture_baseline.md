@@ -45,6 +45,17 @@ Verified against the fork source, not just symbols:
 | sglang unit tests brought by #43450 (`test_deferred_output.py`, `test_forward_observer.py`) against the fork + cherry-pick | 33 passed |
 | SpecForge plugin integration test (`test_sglang_capture_plugin_integration.py`, real scheduler/streaming code with a Mooncake stand-in) against the fork | 1 passed |
 | Plugin unit + sink suites (`test_sglang_capture_plugin.py`, `test_sglang_capture_plugin_sink.py`, includes the N1 Ascend changes) under the NPU venv against the fork | 51 passed, 6 skipped (CUDA-only) |
+| N0 exit 1: plain forward / minimal generation, Qwen3.5-4B (qwen3_5, GDN hybrid VL) on device 3, `disable_cuda_graph`, `mamba_ssm_dtype=bfloat16` | passed (`scripts/npu/smoke_plain_forward.py`) |
+| N0 exit 2: boot with `enable_return_aux_hidden_states` + `speculative_algorithm=DFLASH` + `return_aux_hidden_state_layer_ids=[2,16,29]` + `return_hidden_states_mode=full` + `chunked_prefill_size=-1`; full-prefill `max_new_tokens=0` request | passed; `aux_hidden_state_capture` resolved to `dflash`, draft algorithm reset as designed |
+| N0 exit 4 (partial): plugin capture request lifecycle on the real NPU scheduler (`scripts/npu/smoke_plugin_capture.py`) | passed up to the transport boundary: `SpecForge spec capture enabled (host publication, writer=True)` at startup; the spec_capture request was held, the observer found both `aux` and `last_hidden` rows (no missing-artifact error), and the sink's lazy Mooncake import failure surfaced as `meta_info["spec_capture"]=[{"sample_id":"s0","error":"No module named 'mooncake'}"]`; a normal request was unaffected |
+
+Platform notes:
+
+- 910B3 (pre-arch35) rejects FP32 GDN `initial_state` in
+  `torch.ops.npu.chunk_gated_delta_rule`; run with
+  `mamba_ssm_dtype=bfloat16` until the kernel accepts or downcasts FP32
+  states. This is a model-kernel constraint, independent of capture.
+- The NPU smoke scripts live in `scripts/npu/` on this branch.
 
 ## Branch series (archive map)
 
@@ -68,16 +79,22 @@ profiling data picks them.
 
 ## Remaining N0 exit items (need real NPU runs)
 
-1. Target model loads and runs a plain (no-capture) forward / minimal
-   generation on the fork: tiny model first, then the actual Qwen3.5 / GDN
-   hybrid target.
-2. Aux + last-hidden minimal forward on the real target: layer order, full
-   token rows, dtype/shape, post-norm semantics, head-scaling contract.
+1. ~~Target model loads and runs a plain forward~~ — done for Qwen3.5-4B
+   (see the verification log). Still open: any other target (e.g. 9B/35B
+   variants) follows the same script.
+2. ~~Aux-capture boot + full-prefill request~~ — done for Qwen3.5-4B.
+   Still open: numeric check of captured aux rows against a reference
+   forward (layer order, post-norm last hidden, head-scaling contract).
 3. Real prefill graph lifecycle: prove a replay happens, and a captured
-   batch A survives a later replay B (S1 territory if it fails).
-4. Launch the capture server with the plugin installed and run one
-   capture → Mooncake → read-back → training-step smoke (this is the N2
-   entry point).
+   batch A survives a later replay B (S1 territory if it fails). The smokes
+   so far ran with `disable_cuda_graph` (eager), so this is fully open.
+4. ~~Plugin capture request lifecycle on the real stack
+   (`scripts/npu/smoke_plugin_capture.py`)~~ — done up to the transport
+   boundary (deferral, row capture and the error path all verified; the
+   sink fails only at the lazy Mooncake import). Still open: an actual
+   capture → Mooncake → read-back → training-step smoke needs a Mooncake
+   build for this host (not installed in venv-gdn-compact as of this
+   writing) — this is the N2 entry point.
 
 ## Rollback
 
