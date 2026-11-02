@@ -48,6 +48,7 @@ Verified against the fork source, not just symbols:
 | N0 exit 1: plain forward / minimal generation, Qwen3.5-4B (qwen3_5, GDN hybrid VL) on device 3, `disable_cuda_graph`, `mamba_ssm_dtype=bfloat16` | passed (`scripts/npu/smoke_plain_forward.py`) |
 | N0 exit 2: boot with `enable_return_aux_hidden_states` + `speculative_algorithm=DFLASH` + `return_aux_hidden_state_layer_ids=[2,16,29]` + `return_hidden_states_mode=full` + `chunked_prefill_size=-1`; full-prefill `max_new_tokens=0` request | passed; `aux_hidden_state_capture` resolved to `dflash`, draft algorithm reset as designed |
 | N0 exit 4 (partial): plugin capture request lifecycle on the real NPU scheduler (`scripts/npu/smoke_plugin_capture.py`) | passed up to the transport boundary: `SpecForge spec capture enabled (host publication, writer=True)` at startup; the spec_capture request was held, the observer found both `aux` and `last_hidden` rows (no missing-artifact error), and the sink's lazy Mooncake import failure surfaced as `meta_info["spec_capture"]=[{"sample_id":"s0","error":"No module named 'mooncake'}"]`; a normal request was unaffected |
+| N0 exit 2 (numeric half): captured aux rows vs an HF fp32 CPU reference forward (`scripts/npu/verify_capture_numerics.py`, same prompt, capture-ON engine rows via `return_hidden_states=True` under `return_hidden_states_mode=full`) | passed (`VERIFY_OK`). Empirically established capture convention on this fork: **the aux chunk for requested layer L is that layer's completed *output* residual** (matches HF `hidden_states[L+1]`), not the layer input — chunk rel-err 5e-3..1e-2, cos 0.99994..0.99999 vs fp32 reference, and each neighbor-layer offset is 30-100x worse, so the layer order is unambiguous. Final hidden rows match HF post-norm (`cos=0.999957`; pre-norm neighbor 0.51), and the engine's greedy next token (id 11751) equals the HF top-1, so the no-softcap/no-muP lm_head contract reproduces |
 
 Platform notes:
 
@@ -82,9 +83,9 @@ profiling data picks them.
 1. ~~Target model loads and runs a plain forward~~ — done for Qwen3.5-4B
    (see the verification log). Still open: any other target (e.g. 9B/35B
    variants) follows the same script.
-2. ~~Aux-capture boot + full-prefill request~~ — done for Qwen3.5-4B.
-   Still open: numeric check of captured aux rows against a reference
-   forward (layer order, post-norm last hidden, head-scaling contract).
+2. ~~Aux-capture boot + full-prefill request~~ — done for Qwen3.5-4B,
+   including the numeric check against an HF fp32 CPU reference (layer order,
+   post-norm last hidden, head contract; see the verification log).
 3. Real prefill graph lifecycle: prove a replay happens, and a captured
    batch A survives a later replay B (S1 territory if it fails). The smokes
    so far ran with `disable_cuda_graph` (eager), so this is fully open.
