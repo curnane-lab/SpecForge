@@ -49,6 +49,7 @@ Verified against the fork source, not just symbols:
 | N0 exit 2: boot with `enable_return_aux_hidden_states` + `speculative_algorithm=DFLASH` + `return_aux_hidden_state_layer_ids=[2,16,29]` + `return_hidden_states_mode=full` + `chunked_prefill_size=-1`; full-prefill `max_new_tokens=0` request | passed; `aux_hidden_state_capture` resolved to `dflash`, draft algorithm reset as designed |
 | N0 exit 4 (partial): plugin capture request lifecycle on the real NPU scheduler (`scripts/npu/smoke_plugin_capture.py`) | passed up to the transport boundary: `SpecForge spec capture enabled (host publication, writer=True)` at startup; the spec_capture request was held, the observer found both `aux` and `last_hidden` rows (no missing-artifact error), and the sink's lazy Mooncake import failure surfaced as `meta_info["spec_capture"]=[{"sample_id":"s0","error":"No module named 'mooncake'}"]`; a normal request was unaffected |
 | N0 exit 2 (numeric half): captured aux rows vs an HF fp32 CPU reference forward (`scripts/npu/verify_capture_numerics.py`, same prompt, capture-ON engine rows via `return_hidden_states=True` under `return_hidden_states_mode=full`) | passed (`VERIFY_OK`). Empirically established capture convention on this fork: **the aux chunk for requested layer L is that layer's completed *output* residual** (matches HF `hidden_states[L+1]`), not the layer input — chunk rel-err 5e-3..1e-2, cos 0.99994..0.99999 vs fp32 reference, and each neighbor-layer offset is 30-100x worse, so the layer order is unambiguous. Final hidden rows match HF post-norm (`cos=0.999957`; pre-norm neighbor 0.51), and the engine's greedy next token (id 11751) equals the HF top-1, so the no-softcap/no-muP lm_head contract reproduces |
+| N0 exit 3: prefill graph lifecycle (`scripts/npu/verify_capture_graph_lifecycle.py`, `cuda_graph_backend_prefill=breakable` + explicit `cuda_graph_bs_prefill=[64,128,512]`, radix cache off so the repeat capture really re-prefills) | passed (`VERIFY_GRAPH_OK`). Boot log shows `Capturing prefill shape` and prefill batches report `npu graph: True`, so a replay really happened. Capture request A followed by an interleaved burst and a repeat A2: A's aux rows match the eager reference (rel 5.7e-3..1.2e-2, cos 0.99994+), and A2 is bit-identical to A — later replays do not corrupt a drained capture. Decode graphs also capture and run on this stack (bs 1..64) |
 
 Platform notes:
 
@@ -57,6 +58,17 @@ Platform notes:
   `mamba_ssm_dtype=bfloat16` until the kernel accepts or downcasts FP32
   states. This is a model-kernel constraint, independent of capture.
 - The NPU smoke scripts live in `scripts/npu/` on this branch.
+- Graph paths (decode graph capture, prefill graph) import the CANN `acl`
+  python module — source `/usr/local/Ascend/ascend-toolkit/set_env.sh` first,
+  and prepend the fork's `python/` to the resulting `PYTHONPATH` (the script
+  appends its own). Eager runs do not need this.
+- The prefill graph stays off unless `cuda_graph_bs_prefill` is set
+  explicitly; `cuda_graph_backend_prefill=breakable` alone resolves to
+  "capture size is not set" and silently falls back to eager prefill.
+- An HF eager reference forward does not run on the NPU here (torch_npu
+  conv1d → GE/TBE init fails without the full toolkit runtime); the numerics
+  script uses a CPU fp32 HF reference instead, which is also the cleaner
+  reference for measuring engine bf16 divergence.
 
 ## Branch series (archive map)
 
@@ -86,9 +98,10 @@ profiling data picks them.
 2. ~~Aux-capture boot + full-prefill request~~ — done for Qwen3.5-4B,
    including the numeric check against an HF fp32 CPU reference (layer order,
    post-norm last hidden, head contract; see the verification log).
-3. Real prefill graph lifecycle: prove a replay happens, and a captured
-   batch A survives a later replay B (S1 territory if it fails). The smokes
-   so far ran with `disable_cuda_graph` (eager), so this is fully open.
+3. ~~Real prefill graph lifecycle~~ — done for Qwen3.5-4B
+   (`scripts/npu/verify_capture_graph_lifecycle.py`): replay proven in the
+   boot/batch logs, capture A survives later replays, repeat capture A2 is
+   bit-identical. No S1 core defect surfaced on this stack.
 4. ~~Plugin capture request lifecycle on the real stack
    (`scripts/npu/smoke_plugin_capture.py`)~~ — done up to the transport
    boundary (deferral, row capture and the error path all verified; the
