@@ -30,7 +30,7 @@ PROMPT = "The capital of France is"
 HIDDEN = 2560
 
 
-def run_engine(model_path, *, capture: bool):
+def run_engine(model_path, *, capture: bool, tp_size: int = 1):
     import sglang as sgl
 
     kwargs = dict(
@@ -42,6 +42,7 @@ def run_engine(model_path, *, capture: bool):
         log_level="warning",
         return_hidden_states_mode="full",
         chunked_prefill_size=-1,
+        tp_size=tp_size,
     )
     if capture:
         kwargs.update(
@@ -102,16 +103,17 @@ def cos_sim(a, b):
 
 def main():
     model_path = sys.argv[1] if len(sys.argv) > 1 else "/data1/f00538480/Qwen3.5-4B"
+    tp_size = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 
-    print("=== run A: capture ON (aux via response) ===", flush=True)
-    aux_rows, tok_a, top_a = run_engine(model_path, capture=True)
+    print(f"=== run A: capture ON (aux via response), tp={tp_size} ===", flush=True)
+    aux_rows, tok_a, top_a = run_engine(model_path, capture=True, tp_size=tp_size)
     k = len(LAYER_IDS)
     assert aux_rows.shape == (aux_rows.shape[0], k * HIDDEN), aux_rows.shape
     chunks = [aux_rows[:, i * HIDDEN : (i + 1) * HIDDEN] for i in range(k)]
     print(f"aux rows: {tuple(aux_rows.shape)} -> {k} chunks of {HIDDEN}")
 
     print("=== run B: capture OFF (final post-norm hidden) ===", flush=True)
-    final_rows, tok_b, top_b = run_engine(model_path, capture=False)
+    final_rows, tok_b, top_b = run_engine(model_path, capture=False, tp_size=tp_size)
     assert final_rows.shape[1] == HIDDEN, final_rows.shape
     assert tok_a == tok_b, (tok_a, tok_b)
     print(f"final rows: {tuple(final_rows.shape)}, next token id: {tok_a}")
