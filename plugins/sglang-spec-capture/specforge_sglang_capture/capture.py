@@ -423,6 +423,17 @@ class CaptureRuntime:
         self.observer = CaptureObserver(self)
 
 
+def _model_device(model_runner) -> Optional[torch.device]:
+    """The model runner's actual device, or ``None`` when it does not say."""
+    raw = getattr(model_runner, "device", None)
+    if raw is None:
+        return None
+    try:
+        return torch.device(raw)
+    except (TypeError, RuntimeError):
+        return None
+
+
 def install(scheduler) -> CaptureRuntime:
     """Validate the server configuration and wire capture into ``scheduler``."""
     from sglang.srt.disaggregation.utils import DisaggregationMode
@@ -463,11 +474,16 @@ def install(scheduler) -> CaptureRuntime:
         # The sink allocates the arena on the first capture; reject a missing
         # size now rather than failing every capture batch.
         arena_bytes()
+    # Resolve publication against the model's actual device at startup: an
+    # unsupported combination (GPU_PUT=1 or nvlink on non-CUDA) fails here,
+    # not inside the first capture's sink thread.
+    device = _model_device(model_runner)
+    gpu_put = gpu_put_enabled(device)
 
     runtime = CaptureRuntime(
-        sink=SpecCaptureSink(features.return_aux_hidden_state_layer_ids),
+        sink=SpecCaptureSink(features.return_aux_hidden_state_layer_ids, device=device),
         is_writer=get_parallel().attn_tp_rank == 0,
-        gpu_put=gpu_put_enabled(),
+        gpu_put=gpu_put,
         max_pending_batches=int(os.environ.get(MAX_PENDING_BATCHES_ENV, "2")),
         defer_response=scheduler.defer_response,
     )

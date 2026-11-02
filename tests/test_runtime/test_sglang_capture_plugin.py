@@ -502,6 +502,40 @@ class TestInstall(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "PD disaggregation"):
                     self._install(scheduler)
 
+    def test_npu_server_selects_host_publication(self):
+        scheduler = _scheduler()
+        scheduler.tp_worker.model_runner.device = torch.device("npu", 1)
+        env = {"MOONCAKE_PROTOCOL": "rdma", "ASCEND_RT_VISIBLE_DEVICES": "0,1"}
+        _, runtime = self._install(scheduler, env=env)
+        self.addCleanup(runtime.sink._executor.shutdown)
+        self.assertFalse(runtime.gpu_put)
+        self.assertEqual(runtime.sink.device, torch.device("npu", 1))
+
+    def test_npu_rejects_device_publication_at_install(self):
+        scheduler = _scheduler()
+        scheduler.tp_worker.model_runner.device = "npu:0"
+        env = {"MOONCAKE_PROTOCOL": "rdma", "SGLANG_SPEC_CAPTURE_GPU_PUT": "1"}
+        with self.assertRaisesRegex(ValueError, "SGLANG_SPEC_CAPTURE_GPU_PUT"):
+            self._install(scheduler, env=env)
+
+    def test_npu_rejects_nvlink_at_install(self):
+        scheduler = _scheduler()
+        scheduler.tp_worker.model_runner.device = "npu:0"
+        env = {
+            "MOONCAKE_PROTOCOL": "nvlink",
+            "SGLANG_SPEC_CAPTURE_ARENA_BYTES": str(1 << 30),
+        }
+        with self.assertRaisesRegex(ValueError, "nvlink"):
+            self._install(scheduler, env=env)
+
+    def test_cuda_server_keeps_device_publication(self):
+        scheduler = _scheduler()
+        scheduler.tp_worker.model_runner.device = "cuda:0"
+        env = {"MOONCAKE_PROTOCOL": "rdma", "SGLANG_SPEC_CAPTURE_GPU_PUT": "1"}
+        _, runtime = self._install(scheduler, env=env)
+        self.addCleanup(runtime.sink._executor.shutdown)
+        self.assertTrue(runtime.gpu_put)
+
     def test_rejects_sglang_builds_without_the_extension_points(self):
         for missing in ("forward_observer", "defer_response"):
             with self.subTest(missing=missing):
