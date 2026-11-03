@@ -69,14 +69,30 @@ Verified against the fork source, not just symbols:
 The workload captures aux plus last hidden in BF16: 80 MiB for each
 4096-token sample, 40 MiB for 2048 tokens, 2.5195 MiB for 129 tokens, and
 0.1367 MiB for 7 tokens. The unbudgeted baseline overlapped an 80 MiB batch
-with a 202.5 MiB batch. The final implementation reserves requested feature
-bytes before row selection/clone and D2H, releases them after publication,
-and lets an oversized batch run alone. The 128 MiB run admitted 80 MiB,
-80 MiB, 120.15625 MiB, and finally a 2.5 MiB sample overlapping the previous
-batch; its 122.65625 MiB peak stayed below the 128 MiB limit. This is payload
-admission evidence, not an end-to-end speedup claim. It does not bound
+with a 202.5 MiB batch. The final implementation reserves the actual retained
+tensor bytes before row selection/clone and D2H, releases them after
+publication, and lets an oversized batch run alone. The 128 MiB run admitted
+80 MiB, 80 MiB, 120.15625 MiB, and finally a 2.5 MiB sample overlapping the
+previous batch; its 122.65625 MiB peak stayed below the 128 MiB limit. This is
+payload admission evidence, not an end-to-end speedup claim. It does not bound
 Mooncake-resident objects or attribute the full NPU reserved-memory high-water
-mark to capture, because that also includes prefill workspaces.
+mark to capture, because that also includes prefill workspaces. The oversized
+batch exception can exceed the configured budget, so this is not a hard
+peak-memory cap. The default is now `0` (disabled) to preserve existing
+admission behavior.
+
+Review follow-up: aux-only, last-hidden-only, and mixed-feature tests now
+assert that reservation bytes equal actual D2H bytes. Capacity errors carry
+`backpressure: "publication_bytes"`; the real adapter retries only rejected
+tasks with a 60 s deadline, without consuming prompt attempts while waiting.
+The plugin/sink/adapter/official-producer suites pass **114 tests, 6 skipped**,
+and the real SGLang integration test passes. This includes an official-producer
+fault-injection gate where seven capacity responses followed by success still
+complete with `max_prompt_attempts=1`. The real-NPU official-producer script is
+`scripts/npu/measure_publication_producer.py`; its slow-sink backpressure gate
+remains **unverified** because all eight NPUs became occupied by external
+processes before the request phase. The earlier custom-request result above is
+not a substitute for that remaining hardware gate.
 
 Platform notes:
 
