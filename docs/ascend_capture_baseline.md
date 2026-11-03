@@ -82,17 +82,28 @@ peak-memory cap. The default is now `0` (disabled) to preserve existing
 admission behavior.
 
 Review follow-up: aux-only, last-hidden-only, and mixed-feature tests now
-assert that reservation bytes equal actual D2H bytes. Capacity errors carry
+assert that reservation bytes equal actual D2H bytes. Filtering missing or
+unfinished requests keeps the original storage reservation until the future
+completes; a 60 B reservation cannot be reduced to 20 B while the sink still
+holds 60 B of sliced storage. Capacity errors carry
 `backpressure: "publication_bytes"`; the real adapter retries only rejected
 tasks with a 60 s deadline, without consuming prompt attempts while waiting.
-The plugin/sink/adapter/official-producer suites pass **114 tests, 6 skipped**,
-and the real SGLang integration test passes. This includes an official-producer
+Virtual-clock tests prove that no retry starts at the deadline and that each
+retry's HTTP timeout is capped to the remaining time. The
+plugin/sink/adapter/official-producer suites pass **116 tests, 6 skipped**, and
+the real SGLang integration test passes. This includes an official-producer
 fault-injection gate where seven capacity responses followed by success still
-complete with `max_prompt_attempts=1`. The real-NPU official-producer script is
-`scripts/npu/measure_publication_producer.py`; its slow-sink backpressure gate
-remains **unverified** because all eight NPUs became occupied by external
-processes before the request phase. The earlier custom-request result above is
-not a substitute for that remaining hardware gate.
+complete with `max_prompt_attempts=1`.
+
+The real-NPU official-producer gate (`scripts/npu/measure_publication_producer.py`,
+Qwen3.5-4B, 128 MiB budget, 10 s sink delay, six concurrent single-task leases
+with staggered arrivals) passed with `MEASURE_PUBLICATION_PRODUCER_OK`: the
+default `max_prompt_attempts=5` producer completed all six samples in 41.994 s,
+observed 106 structured backpressure responses, and read every sample back with
+correct input IDs, masks, and hidden-state shapes. Every rejected reservation
+reached D2H with zero payload. A 200 MiB combined batch was admitted alone
+under the oversized-batch exception, directly exercising the documented
+non-hard-cap behavior.
 
 Platform notes:
 
