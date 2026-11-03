@@ -62,6 +62,21 @@ Verified against the fork source, not just symbols:
 | Checkpoint resume (offline route) | passed bit-exact: run to step 8 uninterrupted vs `training.resume_from` the step-4 checkpoint of a completed run — resumed steps 5–8 losses equal the uninterrupted run's to the last bit (optimizer/RNG/sample position fully restored; no repeated or corrupted samples) |
 | Fixed-data loss equivalence, online route vs offline route | passed **bit-identical at every step** (8/8 steps, rel diff 0.0) once the consumption order is aligned. Two orderings exist upstream and they differ for the same seed: the online producer consumes in `random.Random(training.seed + epoch)` shuffle order, the offline trainer in `torch.randperm(seed + epoch)` (DistributedSampler) order. With the offline file order realigned so both paths consume `[3,4,6,7,2,5,0,1]`, and the features being the capture server's own Mooncake bytes (`scripts/npu/server_capture_to_files.py` replays the managed server's argv and the producer's shuffled batch), every per-step loss matches `0.0000%`. Draft init is also bit-identical across both paths (probe: SHA-256 over all named parameters equal, `81a08985…`; probe reverted after use) |
 | Capture numerics envelope (same model/prompts, different capture arrangements) | server (launch_server, batched 8-seq prefill) vs in-process Engine: 4/8 samples bit-identical, the rest rel ≤ 9.8e-3 (bf16 intra-batch arrangement noise) with ≤ 0.02pp loss impact per step; serial vs batched prefill: rel ≈ 1.2e-2, ≤ 0.8% loss impact; `page_size` 64 vs 128: bit-identical. All far below semantic error (a layer permutation would leave loss flat at ~ln(vocab)) |
+| N4 mixed-length slow-sink gate (`scripts/npu/measure_publication_memory.py` + `publication_memory_sitecustomize.py`, Qwen3.5-4B, layers `[2,16,29]`, lengths `4096,4096,4096,7,2048,129`, 10 s `put_samples` delay) | passed (`MEASURE_PUBLICATION_MEMORY_OK`). Without a byte budget, two publication batches held **282.5 MiB** in flight despite `MAX_PENDING_BATCHES=2`. With `SGLANG_SPEC_CAPTURE_MAX_PENDING_BYTES=128 MiB`, every capacity rejection reached D2H with **0 payload bytes**, the observed reservation peak was **128,614,400 bytes (122.65625 MiB)**, and all six samples eventually succeeded. Retry gating reduced the worst sample from 30 attempts in the first implementation to 10; it does not eliminate retries |
+
+### N4 publication-byte measurement
+
+The workload captures aux plus last hidden in BF16: 80 MiB for each
+4096-token sample, 40 MiB for 2048 tokens, 2.5195 MiB for 129 tokens, and
+0.1367 MiB for 7 tokens. The unbudgeted baseline overlapped an 80 MiB batch
+with a 202.5 MiB batch. The final implementation reserves requested feature
+bytes before row selection/clone and D2H, releases them after publication,
+and lets an oversized batch run alone. The 128 MiB run admitted 80 MiB,
+80 MiB, 120.15625 MiB, and finally a 2.5 MiB sample overlapping the previous
+batch; its 122.65625 MiB peak stayed below the 128 MiB limit. This is payload
+admission evidence, not an end-to-end speedup claim. It does not bound
+Mooncake-resident objects or attribute the full NPU reserved-memory high-water
+mark to capture, because that also includes prefill workspaces.
 
 Platform notes:
 
