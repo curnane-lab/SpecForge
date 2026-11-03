@@ -130,9 +130,10 @@ curnane-lab/SpecForge (stacked, bottom-up):
 | `npu/capture-baseline` | upstream/main `af1c3f3` | this document: SHA inventory + verification log | N0 record |
 | `npu/spec-capture-ascend` | `npu/capture-baseline` | full work history incl. `scripts/npu/` smoke assets (archive) | N0+N1+N2 |
 | `pr/npu/spec-capture-ascend` | upstream/main `af1c3f3` | PR-ready: N1 plugin hardening + unit tests + existing Ascend guide/plugin README updates, no smoke assets | N1+N2 PR |
+| `pr/capture-publication-bytes` | upstream/main `af1c3f3` | PR-ready: publication byte reservations, retry gating, unit tests and plugin configuration documentation | N4 PR |
 
-N3/N4/N5 are measurement-gated; no placeholder branches until the N2
-profiling data picks them.
+N3/N5 remain measurement-gated; no placeholder branches until profiling and
+backend capability checks pick them.
 
 ## Remaining N0 exit items (need real NPU runs)
 
