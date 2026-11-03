@@ -13,6 +13,13 @@ Status: every step of this guide, including the section "Migration procedure"
 step 5 training smoke, has been executed on the validated combination below
 (see `ascend_capture_baseline.md` for the full verification log).
 
+Note: the `scripts/npu/` smoke and verification scripts referenced below live
+on the full archive branch `npu/spec-capture-ascend`
+(curnane-lab/SpecForge), alongside this document and the baseline log. The PR
+branch `pr/npu/spec-capture-ascend` carries only the plugin fix, its unit
+tests, and the condensed updates to the existing Ascend guide and plugin
+README.
+
 ## Route mapping
 
 | Concern | Legacy route | Native route |
@@ -21,7 +28,7 @@ step 5 training smoke, has been executed on the validated combination below
 | Aux layer selection | `--spec-capture-aux-layer-ids` (patch flag) | `--enable-return-aux-hidden-states --return-aux-hidden-state-layer-ids <ids> --return-hidden-states-mode full` (launcher emits these itself in plugin mode) |
 | Ascend Mooncake registration | source patch on the server | built into the plugin sink (`setup(0,0)` + `allocate_and_mount_segment(size, protocol, "cpu")`); no patch is applied |
 | Producer | in-process capture / file protocol | `specforge train --role producer`, control plane only; tensors never enter the producer |
-| Offline capture | `offline_capture/sglang_backend` in-process ModelRunner (deleted upstream by #1064) | plugin → Mooncake → CPU client → file (`#1064` route); the legacy backend stays available on the freeze branch until N2 closes |
+| Offline capture | `offline_capture/sglang_backend` in-process ModelRunner (#1064 proposes deleting it; still present on main at validation time) | plugin → Mooncake → CPU client → file (the route #1064 proposes); validated here with the archive script `offline_roundtrip.py`, which is a verification harness, not a public CLI — the legacy backend stays available on the freeze branch until N2 closes |
 | Spec transport to server | top-level `spec_capture` request field | `sampling_params.custom_params`; `deployment.disaggregated.server_capture: plugin` tells the producer which wire to use |
 
 The Ascend mount semantics (host segment, `location:`-free registration) moved
@@ -108,7 +115,11 @@ All of the following must pass on the same pinned combination:
   cos ≥ 0.9999 vs the HF fp32 reference; final hidden post-norm).
 - `verify_capture_graph_lifecycle.py` with real prefill replays (capture A,
   interleave replay B, delayed read of A unchanged; repeat capture
-  bit-identical).
+  bit-identical) — this covers the plain hidden-state path. The plugin-chain
+  counterpart `verify_plugin_graph_lifecycle.py` sends real `spec_capture`
+  requests with a test-only delayed sink: later replays must complete while
+  A's publication is still pending, and A's published bytes are then checked
+  against the eager reference (plus an isolated, bit-identical repeat A2).
 - `verify_mooncake_e2e.py` and `verify_trainer_consume.py` (bit-identical aux
   through Mooncake; release → `KeyError`).
 - Training smoke: ≥3 DFlash steps, finite loss, control-plane artifacts
@@ -129,8 +140,10 @@ All of the following must pass on the same pinned combination:
 consumes prompts in `random.Random(training.seed + epoch)` shuffle order; the
 offline trainer consumes feature files in `torch.randperm(seed + epoch)`
 (DistributedSampler) order. The same seed therefore yields *different*
-per-step sample orders across the two routes; per-step loss comparisons must
-realign order first (or compare loss multisets). This is an upstream behavior
+per-step sample orders across the two routes. Training parity must align the
+feature bytes, model initialization, sample and batch order, and optimizer/RNG
+state before comparing per-step losses — reordering samples changes the
+weights every later loss is computed against. This is an upstream behavior
 note, not an NPU defect.
 
 ## Rollback
