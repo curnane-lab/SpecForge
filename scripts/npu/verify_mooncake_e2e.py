@@ -13,8 +13,9 @@ Checks:
   2. An independent client store reads each object back: the passthrough
      input_ids are byte-exact; the aux payload equals, bit for bit, the aux
      rows the same engine returns for a follow-up return_hidden_states
-     request on the same prompt (radix disabled, so it re-prefills);
-     last_hidden has the right shape/dtype and is finite.
+     request on the same prompt (radix disabled, so it re-prefills).
+  3. The published target matches a capture-off post-norm reference row for
+     row. VERIFY_BASE_GPU_ID selects the same logical card for both engines.
 """
 
 import json
@@ -28,6 +29,7 @@ LAYER_IDS = [2, 16, 29]
 HIDDEN = 2560
 INPUT_IDS = [151644, 872, 198, 6023, 374, 11914, 30, 151645, 198]
 STORE_ID, SAMPLE_ID, GEN = "e2e", "s0", 1
+BASE_GPU_ID = int(os.environ.get("VERIFY_BASE_GPU_ID", "0"))
 
 
 def rel_err(a, b):
@@ -42,6 +44,7 @@ def main():
 
     engine = sgl.Engine(
         model_path=model_path,
+        base_gpu_id=BASE_GPU_ID,
         mem_fraction_static=0.5,
         page_size=64,
         disable_cuda_graph=True,
@@ -63,7 +66,12 @@ def main():
         "replace": False,
         "features": {"aux": "hidden_states", "last_hidden": "target"},
         "passthrough": [
-            {"name": "input_ids", "data": INPUT_IDS, "shape": [1, len(INPUT_IDS)], "dtype": "int64"}
+            {
+                "name": "input_ids",
+                "data": INPUT_IDS,
+                "shape": [1, len(INPUT_IDS)],
+                "dtype": "int64",
+            }
         ],
     }
     failures = []
@@ -139,21 +147,80 @@ def main():
     else:
         print("input_ids: byte-exact")
 
-    aux = read_back("hidden_states", (1, n_prompt, len(LAYER_IDS) * HIDDEN), torch.bfloat16)
+    aux = read_back(
+        "hidden_states", (1, n_prompt, len(LAYER_IDS) * HIDDEN), torch.bfloat16
+    )
     aux = aux[0].float()
-    print(f"aux: shape {tuple(aux.shape)}, rel_err vs engine rows = {rel_err(aux, ref_aux):.3e}")
+    print(
+        f"aux: shape {tuple(aux.shape)}, rel_err vs engine rows = {rel_err(aux, ref_aux):.3e}"
+    )
     if aux.shape != ref_aux.shape or not torch.equal(aux, ref_aux):
         failures.append(
             f"aux payload differs from the engine's own rows (rel_err={rel_err(aux, ref_aux):.3e})"
         )
 
     last = read_back("target", (1, n_prompt, HIDDEN), torch.bfloat16)[0].float()
-    print(f"last_hidden: shape {tuple(last.shape)}, finite={torch.isfinite(last).all().item()}")
+    print(
+        f"last_hidden: shape {tuple(last.shape)}, finite={torch.isfinite(last).all().item()}"
+    )
     if not torch.isfinite(last).all():
         failures.append("last_hidden contains non-finite values")
 
     store.close()
     engine.shutdown()
+
+    print(
+        "=== capture-off post-norm reference on the same logical device ===", flush=True
+    )
+    os.environ.pop("SPECFORGE_SPEC_CAPTURE", None)
+    reference_engine = sgl.Engine(
+        model_path=model_path,
+        base_gpu_id=BASE_GPU_ID,
+        mem_fraction_static=0.5,
+        page_size=64,
+        disable_cuda_graph=True,
+        mamba_ssm_dtype="bfloat16",
+        log_level="info",
+        return_hidden_states_mode="full",
+        chunked_prefill_size=-1,
+        skip_tokenizer_init=True,
+        disable_radix_cache=True,
+    )
+    reference = reference_engine.generate(
+        None,
+        input_ids=INPUT_IDS,
+        sampling_params={"max_new_tokens": 1, "temperature": 0.0},
+        return_hidden_states=True,
+    )
+    reference_meta = reference["meta_info"]
+    reference_rows = [row for block in reference_meta["hidden_states"] for row in block]
+    reference_target = torch.tensor(
+        reference_rows[: reference_meta["prompt_tokens"]], dtype=torch.float32
+    )
+    reference_engine.shutdown()
+
+    if last.shape != reference_target.shape:
+        failures.append(
+            f"target shape {tuple(last.shape)} != post-norm reference "
+            f"{tuple(reference_target.shape)}"
+        )
+    else:
+        exact_rows = (last == reference_target).all(dim=1)
+        row_rel = (last - reference_target).norm(dim=1) / reference_target.norm(
+            dim=1
+        ).clamp_min(1e-6)
+        row_cos = torch.nn.functional.cosine_similarity(last, reference_target, dim=1)
+        print(
+            f"target vs post-norm reference: exact_rows="
+            f"{exact_rows.sum().item()}/{last.shape[0]}, "
+            f"max_abs={(last - reference_target).abs().max().item():.3e}, "
+            f"max_row_rel={row_rel.max().item():.3e}, "
+            f"min_row_cos={row_cos.min().item():.9f}"
+        )
+        print("target per-row rel:", [float(value) for value in row_rel])
+        if not exact_rows.all():
+            failures.append("published target differs from the post-norm reference")
+
     print("\n=== RESULT ===")
     if failures:
         for f in failures:
