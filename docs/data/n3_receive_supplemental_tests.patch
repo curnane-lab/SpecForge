@@ -1,0 +1,123 @@
+diff --git a/tests/test_runtime/test_mooncake_receive_npu.py b/tests/test_runtime/test_mooncake_receive_npu.py
+index e4e582c..6a4c52f 100644
+--- a/tests/test_runtime/test_mooncake_receive_npu.py
++++ b/tests/test_runtime/test_mooncake_receive_npu.py
+@@ -6,6 +6,7 @@ mocks; the copy/lifecycle tests require torch_npu and mirror
+ """
+ 
+ import os
++import time
+ import types
+ import unittest
+ from unittest import mock
+@@ -18,6 +19,7 @@ from specforge.runtime.data_plane.mooncake_store import (
+     MooncakeFeatureStore,
+     ReceiveBufferPool,
+ )
++from specforge.runtime.data_plane.sample_ref_queue import SampleRefQueue
+ from tests.test_runtime.test_mooncake_store import _FakeMooncakeStore, _meta
+ 
+ 
+@@ -150,6 +152,102 @@ class MooncakeReceiveNpuTest(unittest.TestCase):
+             loader.close()
+             store.close()
+ 
++    def test_prefetched_queue_handoff_waits_for_collate_on_consumer_stream(self):
++        consumer_stream = torch.npu.Stream()
++        gate_stream = torch.npu.Stream()
++        gate = torch.npu.Event()
++        with torch.npu.stream(consumer_stream):
++            torch.ones(32, device="npu").sum().item()
++        with torch.npu.stream(gate_stream):
++            left = torch.ones(4096, 4096, device="npu", dtype=torch.float16)
++            right = torch.ones(4096, 4096, device="npu", dtype=torch.float16)
++            for _ in range(128):
++                left = left @ right
++            gate.record()
++
++        def delayed_collate(features):
++            source = features[0]["hidden_state"]
++            output = torch.zeros_like(source)
++            torch.npu.current_stream().wait_event(gate)
++            output.copy_(source)
++            return {"hidden_state": output}
++
++        store = MooncakeFeatureStore(
++            store=_FakeMooncakeStore(), receive_buffers="pinned", retain_on_release=True
++        )
++        ref = store.put(
++            {"hidden_state": torch.full((32,), 7.0)},
++            sample_id="sample",
++            metadata=_meta(),
++        )
++        queue = SampleRefQueue()
++        queue.put([ref])
++        loader = FeatureDataLoader(
++            store,
++            queue=queue,
++            device="npu:0",
++            num_workers=1,
++            collate_fn=delayed_collate,
++        )
++        iterator = iter(loader)
++        try:
++            with torch.npu.stream(consumer_stream):
++                batch = next(iterator)
++                result = batch.tensors["hidden_state"].sum()
++            self.assertEqual(result.item(), 224)
++        finally:
++            iterator.close()
++            loader.close()
++            store.close()
++
++    def test_prefetched_handoff_keeps_consumer_stream_pending(self):
++        consumer_stream = torch.npu.Stream()
++        gate_stream = torch.npu.Stream()
++        gate = torch.npu.Event()
++        with torch.npu.stream(consumer_stream):
++            torch.ones(32, device="npu").sum().item()
++        with torch.npu.stream(gate_stream):
++            left = torch.ones(4096, 4096, device="npu", dtype=torch.float16)
++            right = torch.ones(4096, 4096, device="npu", dtype=torch.float16)
++            for _ in range(512):
++                left = left @ right
++            gate.record()
++
++        def delayed_collate(features):
++            source = features[0]["hidden_state"]
++            output = torch.zeros_like(source)
++            torch.npu.current_stream().wait_event(gate)
++            output.copy_(source)
++            return {"hidden_state": output}
++
++        store = MooncakeFeatureStore(
++            store=_FakeMooncakeStore(), receive_buffers="pinned", retain_on_release=True
++        )
++        ref = store.put(
++            {"hidden_state": torch.full((32,), 7.0)},
++            sample_id="sample",
++            metadata=_meta(),
++        )
++        loader = FeatureDataLoader(
++            store,
++            refs=[ref],
++            device="npu:0",
++            num_workers=1,
++            collate_fn=delayed_collate,
++        )
++        iterator = iter(loader)
++        try:
++            with torch.npu.stream(consumer_stream):
++                batch = next(iterator)
++                result = batch.tensors["hidden_state"].sum()
++            time.sleep(0.1)
++            self.assertFalse(consumer_stream.query())
++            self.assertEqual(result.item(), 224)
++        finally:
++            iterator.close()
++            loader.close()
++            store.close()
++
+     def test_pinned_outputs_survive_immediate_slot_reuse(self):
+         backend = _FakeMooncakeStore()
+         producer = MooncakeFeatureStore(store=backend, store_id="test")

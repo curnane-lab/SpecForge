@@ -158,9 +158,33 @@ curnane-lab/SpecForge (stacked, bottom-up):
 | `npu/spec-capture-ascend` | `npu/capture-baseline` | full work history incl. `scripts/npu/` smoke assets (archive) | N0+N1+N2 |
 | `pr/npu/spec-capture-ascend` | upstream/main `af1c3f3` | PR-ready: N1 plugin hardening + unit tests + existing Ascend guide/plugin README updates, no smoke assets | N1+N2 PR |
 | `pr/capture-publication-bytes` | upstream/main `af1c3f3` | PR-ready: publication byte reservations, retry gating, unit tests and plugin configuration documentation | N4 PR |
+| `perf/mooncake-ascend-receive` | upstream/main `af1c3f3` | NPU pinned receive, loader-side H2D and cross-stream handoff | N3 PR #1071 |
 
-N3/N5 remain measurement-gated; no placeholder branches until profiling and
-backend capability checks pick them.
+N5 remains measurement- and backend-capability-gated.
+
+### N3 receive validation and mock-backend microbenchmark
+
+The clean PR head is `d58e652a841579b4e7e0eb0ba4ac322901229d0a`.
+Its validation remains 95 passed, 7 skipped, 1 xfailed with backend autoload
+disabled, and 8 passed on the 910B3. A separate test-only patch,
+`docs/data/n3_receive_supplemental_tests.patch` (SHA-256
+`d1f14c08b62ca3e59cb13f2113dfe9b684e61600004a761df6acf79ef1aff99d`),
+adds two cases to those eight tests; the patched suite passed 10/10 on the
+910B3. This is not a clean-head test count. Earlier delayed-collate negative
+controls also passed on pre-fix code, so the positive handoff tests do not
+establish race-detection capability through the negative control.
+
+`scripts/npu/measure_receive_mock.py` measures
+`MooncakeFeatureStore.get(device="npu:1")` followed by
+`torch.npu.synchronize("npu:1")` on clean `d58e652`. It uses the test suite's
+in-memory `_FakeMooncakeStore`, not TCP or RDMA, and an 8.015625 MiB payload
+(one 8 MiB BF16 tensor plus two int64 tensors). With 10 warmups and 100 timed
+iterations per mode, alternating their order, the median was 1.936 ms for
+pageable receive and 2.220 ms for pinned receive (pageable/pinned ratio
+0.872x). Raw samples and metadata are in
+`docs/data/n3_receive_mock_d58e652.json`. This microbenchmark shows no receive
+speedup at this size and does not change the earlier training A/B conclusion:
+no end-to-end speedup has been demonstrated.
 
 ## Remaining N0 exit items (need real NPU runs)
 

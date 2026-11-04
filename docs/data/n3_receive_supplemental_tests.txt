@@ -1,0 +1,9 @@
+Code under test: d58e652a841579b4e7e0eb0ba4ac322901229d0a
+Supplemental patch SHA-256: d1f14c08b62ca3e59cb13f2113dfe9b684e61600004a761df6acf79ef1aff99d
+Patch scope: tests/test_runtime/test_mooncake_receive_npu.py only; adds two test-only cases to the eight tests already in the PR.
+Hardware: Ascend 910B3, ASCEND_RT_VISIBLE_DEVICES=1, LOCAL_RANK=0
+Command: python -m pytest tests/test_runtime/test_mooncake_receive_npu.py -q
+Result: 10 passed, 15 warnings in 12.41s
+
+This is a d58e652 + test-only patch result, not a clean-PR-head test count.
+Earlier delayed-collate negative controls also passed on pre-fix code, so these positive tests do not demonstrate that the race is detectable by the negative control.
