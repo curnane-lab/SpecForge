@@ -304,6 +304,14 @@ class CIDependencyTest(unittest.TestCase):
         self.assertEqual(self.cached_wheels(), [])
         self.assertFalse((self.root / "calls").exists())
 
+    def test_trusting_the_workspace_is_idempotent(self):
+        self.env["GIT_CONFIG_GLOBAL"] = str(self.root / "gitconfig")
+        self.env["GITHUB_WORKSPACE"] = str(self.root / "workspace")
+        for _ in range(2):
+            self.run_step("Trust the workspace for later git calls")
+        result = self.run_shell("git config --global --get-all safe.directory")
+        self.assertEqual(result.stdout.splitlines(), [self.env["GITHUB_WORKSPACE"]])
+
     def test_workflow_orders_install_check_and_snapshot_before_tests(self):
         names = list(self.steps)
         ordered = [
