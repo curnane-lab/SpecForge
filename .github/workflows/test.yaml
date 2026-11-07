@@ -3,10 +3,15 @@ name: PR Test
 on:
   pull_request:
     branches: [ main ]
+    # edited: a stacked PR retargeted to main after its parent merges gets no
+    # synchronize event, so without this it merges without unit-test.
+    types: [ opened, synchronize, reopened, edited ]
   workflow_dispatch:
 
+# Title/body edits run in their own group, so they neither cancel nor replace
+# a queued test run; their jobs are skipped below.
 concurrency:
-  group: pr-test-${{ github.ref }}
+  group: pr-test-${{ github.ref }}${{ github.event.action == 'edited' && !github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -15,7 +20,8 @@ permissions:
 jobs:
   cleanup-runner:
     if: (github.repository == 'sgl-project/SpecForge' || github.event_name == 'pull_request') &&
-        github.event.pull_request.draft == false
+        github.event.pull_request.draft == false &&
+        (github.event.action != 'edited' || github.event.changes.base)
     runs-on: [self-hosted]
     concurrency:
       group: specforge-gpu-ci
@@ -32,7 +38,8 @@ jobs:
   unit-test:
     needs: cleanup-runner
     if: (github.repository == 'sgl-project/SpecForge' || github.event_name == 'pull_request') &&
-        github.event.pull_request.draft == false
+        github.event.pull_request.draft == false &&
+        (github.event.action != 'edited' || github.event.changes.base)
     runs-on: [self-hosted]
     concurrency:
       group: specforge-gpu-ci

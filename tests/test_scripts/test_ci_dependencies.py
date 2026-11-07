@@ -312,6 +312,16 @@ class CIDependencyTest(unittest.TestCase):
         result = self.run_shell("git config --global --get-all safe.directory")
         self.assertEqual(result.stdout.splitlines(), [self.env["GITHUB_WORKSPACE"]])
 
+    def test_retargeted_prs_run_but_description_edits_do_not(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        # PyYAML reads the bare `on` key as boolean True.
+        types = workflow[True]["pull_request"]["types"]
+        self.assertEqual(set(types), {"opened", "synchronize", "reopened", "edited"})
+        self.assertIn("github.run_id", workflow["concurrency"]["group"])
+        for name in ("cleanup-runner", "unit-test"):
+            with self.subTest(job=name):
+                self.assertIn("github.event.changes.base", workflow["jobs"][name]["if"])
+
     def test_workflow_orders_install_check_and_snapshot_before_tests(self):
         names = list(self.steps)
         ordered = [
