@@ -114,9 +114,10 @@ batch and are computed once when anchors are sampled, using one device-to-host
 transfer of the reduced bounds. All layers and backward replay reuse these
 Python slice bounds. The default is false. A full resume records this setting.
 
-The prefix option has CPU output/gradient coverage. NPU latency and memory
-measurements for this option are pending. Add `--trim-context` to the benchmark
-command to include prefix-bound construction and its synchronization in timing.
+CPU and NPU output/gradient checks cover the prefix option. The reported
+attention and complete-training measurements below show its workload-dependent
+memory and throughput tradeoffs. Add `--trim-context` to the benchmark command
+to include prefix-bound construction and its synchronization in timing.
 
 Use this attention-only forward/backward benchmark to compare tile sizes.
 It includes mask construction and recomputation. Full training throughput and
@@ -166,10 +167,75 @@ of 32 approached the smallest measured allocation while completing faster than
 a tile of 16. The fastest measured 32K tile still increased latency by 28.1%.
 Keep the default zero when throughput is the objective and the dense run fits.
 
-Full Qwen3.5-4B training measurements are pending for training-step time, useful
-tokens/s, whole-device memory and the maximum usable batch size. Both dense
-attention cases completed in this benchmark, so resolving a full-training OOM
-requires validation with the affected training workload.
+##### Reported prefix-trimming attention validation
+
+A subsequent 910B3 run of
+[`bd7a7ac`](https://github.com/curnane-lab/SpecForge/commit/bd7a7aca66d7aa28b074186bce11584e0172bcc8)
+reported 16 tests passed and one CUDA test skipped. All 96 NPU BF16 output and
+Q/K/V-gradient comparisons passed across trim on/off, causal/window, tile and
+GQA combinations, including padding and invalid anchors.
+
+For the same uniform-anchor 32K attention workload, repeated measurements
+included prefix-bound D2H and synchronization. The following table uses the
+retest measurements. Allocations include resident Q/K/V and gradients.
+
+| Configuration | Forward/backward ms | Throughput relative to dense | Peak allocated GiB |
+| --- | ---: | ---: | ---: |
+| Dense | 293.35 | 1.000 | 3.645 |
+| 64 blocks, trim enabled | 265.54 | 1.105 | 2.535 |
+| 128 blocks, trim enabled | 275.60 | 1.064 | 2.586 |
+
+##### Reported GovReport complete-training validation
+
+A single-device validation of the same implementation used Ascend 910B3,
+CANN 9.1.0, PyTorch 2.10, torch_npu 2.10.post6 and Transformers 5.19. It trained
+a six-layer DFlash draft with five sliding-attention layers, one full-attention
+layer and 634,425,856 trainable parameters. Fixed teacher features came from a
+local Qwen3.5-4B target using layers 1, 5, 9, 13, 17, 21, 25 and 29.
+
+The workload used two actual GovReport report/summary pairs per context length,
+with long prompts and suffix-summary supervision. Both arms used independent
+models initialized to the same weights and FP32-master AdamW. Batch size was 2,
+gradient accumulation was 4, scheduler total steps was 10,000 and warmup ratio
+was 0.04. Ten optimizer steps warmed up each arm before 50 measured optimizer
+steps. The 240 microbatches per arm and context had matching anchor hashes.
+
+Single-step comparisons covered complete forward, backward and optimizer
+updates. Gradient relative L2 differences were 0.006136 at 8K and 0.006158 at
+32K, with gradient cosine 0.999981 at both lengths. Updated-parameter cosines
+exceeded 0.9999997. Grad norms were finite and close across arms.
+
+| Context | Dense median step s | Trim median step s | Trim throughput relative to dense | Dense peak GiB | Trim peak GiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8K | 6.720 | 7.616 | 0.882 | 43.36 | 38.67 |
+| 32K | 11.799 | 17.476 | 0.675 | 54.63 | 44.33 |
+
+Here trim used 64 anchor blocks per tile. The complete training loop saved
+4.69 GiB (10.8%) at 8K and 10.30 GiB (18.9%) at 32K, with step-latency increases
+of 13.3% and 48.1%. Effective supervised positions per second changed from
+9,097 to 8,025 at 8K and from 5,170 to 3,491 at 32K. All peaks above are
+allocator peaks.
+
+The reported per-group prefix-length fractions had P50/P90 values of
+0.9479/0.9994 at 8K and 0.98697/0.99988 at 32K. Every sample had 512 valid
+anchors. Suffix-concentrated supervision left little prefix length to remove.
+On this workload the complete-training benefit is reduced memory consumption,
+with a throughput regression at both lengths.
+
+Loss and grad-norm traces showed finite, consistent short-term progress. The
+two examples were repeatedly trained, so these traces establish short-term
+stability. Final quality and serving acceptance require held-out evaluation.
+The uniform-anchor attention measurements and complete-training measurements
+describe distinct workloads.
+
+The supplied artifacts were reported under `/data/dflash-real-validation/`,
+including `single-step-8192.json`, `single-step-32768.json`,
+`ab-formal-8k-comparison.json`, `ab-formal-32k-comparison.json`, per-step
+`steps.jsonl`, `environment.json`, `commands.sh`, scripts and fixed teacher
+features. Multi-device training, actual checkpoint/resume comparison, profiler
+attribution, whole-device HBM and maximum usable batch/context measurements
+remain pending. A full-training OOM claim requires validation with the affected
+workload through complete optimizer steps.
 
 ---
 
