@@ -233,9 +233,57 @@ including `single-step-8192.json`, `single-step-32768.json`,
 `ab-formal-8k-comparison.json`, `ab-formal-32k-comparison.json`, per-step
 `steps.jsonl`, `environment.json`, `commands.sh`, scripts and fixed teacher
 features. Multi-device training, actual checkpoint/resume comparison, profiler
-attribution, whole-device HBM and maximum usable batch/context measurements
-remain pending. A full-training OOM claim requires validation with the affected
-workload through complete optimizer steps.
+attribution, whole-device HBM and maximum context measurements remain pending.
+The following 64K run additionally tested microbatch capacity with an explicitly
+checkpointed recipe.
+
+##### Reported 64K matched-effective-batch validation
+
+A further 910B3 validation of implementation `bd7a7ac` used real 64K suffix
+supervision and explicitly enabled layer checkpointing in both arms. The
+matched effective batch was four samples. Dense used microbatch 2 and two
+accumulation steps, while trim used microbatch 4 and one accumulation step.
+One optimizer step warmed up each arm before 50 measured optimizer steps.
+
+| Metric | Dense B2, accumulation 2 | Trim B4, accumulation 1 |
+| --- | ---: | ---: |
+| Median optimizer step s | 11.914 | 19.960 |
+| P90 optimizer step s | 11.951 | 20.003 |
+| Samples/s | 0.3357 | 0.2004 |
+| Effective supervised positions/s | 2559.35 | 1527.30 |
+| Peak allocated GiB | 33.72 | 47.68 |
+
+Trim increased median step latency by 67.5% and delivered approximately 0.597
+times the dense throughput. Both losses and grad norms remained finite. Each
+of the two fixed samples was processed 100 times during measurement. The mean
+supervised positions per optimizer step differed by approximately 0.005%.
+An additional 50-step dense B3 run reached 0.3348 samples/s.
+
+Capacity probes used accumulation 1 with layer checkpointing enabled.
+
+| Configuration | Largest measured microbatch | Next tested microbatch |
+| --- | ---: | --- |
+| Dense | 3 | B4 ran out of memory on optimizer step 2 |
+| Trim | 4 | B5 ran out of memory on optimizer step 2 |
+
+Trim B4 with accumulation 2 or 3 also ran out of memory on optimizer step 2.
+These measured capacities therefore depend on the recorded accumulation and
+checkpoint settings. The earlier dense 64K B2 OOM observation used a script
+with layer checkpointing disabled. The checkpoint-enabled baseline above
+completed the formal comparison.
+
+At the same microbatch 3, two-step probes measured 44.16 GiB for dense and
+38.13 GiB for trim, a 13.6% reduction. The formal effective-batch comparison
+uses different microbatch sizes and reached the allocations reported in its
+table. On this workload trim enabled a larger microbatch while its effective
+training throughput remained below dense.
+
+All memory figures in this section are allocator peaks. Fixed-sample training
+supports capacity and runtime comparisons; held-out quality and serving
+acceptance need their own evaluation. Supplied reproduction materials include
+`dflash-real-validation/summary-64k-batch-capacity.json`,
+`dflash-real-validation/capacity-64k-formal-comparison.json`, and
+`dflash-real-validation/commands.sh` starting at line 61.
 
 ---
 
