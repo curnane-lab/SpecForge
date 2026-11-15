@@ -91,6 +91,8 @@ def resume_contract(_config, draft_model, training_model):
             "backend": str(training_model.attention_backend),
             "attention_chunk_blocks": training_model.attention_chunk_blocks,
         }
+        if getattr(training_model, "attention_trim_context", False):
+            contract["dflash_attention_backend"]["attention_trim_context"] = True
     if getattr(draft_model, "candidate_selector", None) is not None:
         method_config = dict(getattr(draft_model.config, "dflash_config", None) or {})
         contract.update(

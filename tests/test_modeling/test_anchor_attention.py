@@ -19,14 +19,16 @@ from specforge.modeling.draft.layers.attention.backends import (
 from specforge.modeling.draft.layers.attention.masks import AttentionLayout
 
 
-def metadata(chunk=2, device="cpu"):
+def metadata(chunk=2, device="cpu", *, trim=False):
     anchors = torch.tensor([[0, 4, 9, 14, 16], [0, 3, 8, 0, 0]], device=device)
     keep = torch.tensor([[True] * 5, [True, True, True, False, False]], device=device)
     padding = (
         torch.arange(19, device=device)[None]
         < torch.tensor([19, 12], device=device)[:, None]
     )
-    return AnchorBlockMask(anchors, keep, 19, 4, chunk, context_valid=padding)
+    return AnchorBlockMask(
+        anchors, keep, 19, 4, chunk, context_valid=padding, trim_context=trim
+    )
 
 
 def dense_mask(mask, causal=False, window=None):
@@ -72,7 +74,7 @@ def qkv(mask, *, heads=4, kv_heads=2, value_dim=8, dtype=torch.float64):
 
 
 class AnchorAttentionTest(unittest.TestCase):
-    def _parity(self, device="cpu", dtype=torch.float64):
+    def _parity(self, device="cpu", dtype=torch.float64, *, trim=False):
         for causal, window, chunk, kv_heads, value_dim in product(
             (False, True),
             (None, 3),
@@ -88,7 +90,7 @@ class AnchorAttentionTest(unittest.TestCase):
                 value_dim=value_dim,
             ):
                 torch.manual_seed(7)
-                mask = metadata(chunk, device)
+                mask = metadata(chunk, device, trim=trim)
                 expected_inputs = qkv(
                     mask, kv_heads=kv_heads, value_dim=value_dim, dtype=dtype
                 )
@@ -123,15 +125,36 @@ class AnchorAttentionTest(unittest.TestCase):
     def test_cpu_bfloat16_outputs_and_gradients(self):
         self._parity(dtype=torch.bfloat16)
 
+    def test_cpu_trimmed_prefix_outputs_and_gradients(self):
+        for dtype in (torch.float64, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                self._parity(dtype=dtype, trim=True)
+
+    def test_prefix_bounds_include_both_samples_and_ignore_inactive_blocks(self):
+        self.assertEqual(metadata(trim=True).context_lengths, (4, 14, 16))
+        mask = metadata()
+        mask.keep.zero_()
+        trimmed = AnchorBlockMask(mask.anchors, mask.keep, 19, 4, 2, trim_context=True)
+        self.assertEqual(trimmed.context_lengths, (0, 0, 0))
+        inputs = qkv(trimmed)
+        result = anchor_block_attention(
+            *inputs, trimmed, is_causal=True, sliding_window=3, scale=8**-0.5
+        )
+        gradients = torch.autograd.grad(result.sum(), inputs)
+        for value in (result, *gradients):
+            self.assertTrue(torch.equal(value, torch.zeros_like(value)))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_cuda_bfloat16_outputs_and_gradients(self):
         self._parity("cuda", torch.bfloat16)
+        self._parity("cuda", torch.bfloat16, trim=True)
 
     @unittest.skipUnless(
         hasattr(torch, "npu") and torch.npu.is_available(), "Ascend is required"
     )
     def test_npu_bfloat16_outputs_and_gradients(self):
         self._parity("npu", torch.bfloat16)
+        self._parity("npu", torch.bfloat16, trim=True)
 
     def test_all_inactive_rows_have_zero_output_and_gradients(self):
         mask = metadata()

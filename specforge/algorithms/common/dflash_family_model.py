@@ -269,6 +269,7 @@ class OnlineDFlashModel(nn.Module):
         fused_logits_loss: bool = True,
         objective_checkpointing: bool = True,
         attention_chunk_blocks: int = 0,
+        attention_trim_context: bool = False,
     ):
         super().__init__()
         if metric_top_k <= 0:
@@ -285,6 +286,10 @@ class OnlineDFlashModel(nn.Module):
             raise ValueError("attention_chunk_blocks must be a nonnegative integer")
         if attention_chunk_blocks and attention_backend != "sdpa":
             raise ValueError("attention_chunk_blocks requires attention_backend=sdpa")
+        if type(attention_trim_context) is not bool:
+            raise ValueError("attention_trim_context must be boolean")
+        if attention_trim_context and not attention_chunk_blocks:
+            raise ValueError("attention_trim_context requires attention_chunk_blocks")
         if selector_loss_alpha < 0:
             raise ValueError("selector_loss_alpha must be >= 0")
         if not 0.0 <= selector_warmup_ratio <= 1.0:
@@ -306,6 +311,7 @@ class OnlineDFlashModel(nn.Module):
         self.loss_decay_gamma = loss_decay_gamma
         self.objective_chunk_blocks = int(objective_chunk_blocks)
         self.attention_chunk_blocks = attention_chunk_blocks
+        self.attention_trim_context = attention_trim_context
         self.objective_checkpointing = objective_checkpointing
         self.loss_type = loss_type
         self.dpace_alpha = dpace_alpha
@@ -573,6 +579,7 @@ class OnlineDFlashModel(nn.Module):
                 context_length=sequence_length,
                 block_size=self.block_size,
                 chunk_blocks=self.attention_chunk_blocks,
+                trim_context=self.attention_trim_context,
             )
         mask_builder = (
             create_dflash_block_mask

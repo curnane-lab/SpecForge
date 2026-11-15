@@ -37,6 +37,7 @@ from .registry import TrainingRequirements, register_protocol
 class DFlash2Objective:
     num_anchors: int = 512
     attention_chunk_blocks: int = 0
+    attention_trim_context: bool = False
     loss_decay_gamma: float | None = None
     selector_loss_alpha: float = 1.0
     selector_warmup_steps: int | None = None
@@ -53,6 +54,10 @@ class DFlash2Objective:
         return decay_weighting(self.loss_decay_gamma)
 
     def __post_init__(self):
+        if type(self.attention_trim_context) is not bool:
+            raise ValueError("attention_trim_context must be boolean")
+        if self.attention_trim_context and not self.attention_chunk_blocks:
+            raise ValueError("attention_trim_context requires attention_chunk_blocks")
         check_options(
             counts={"num_anchors": self.num_anchors},
             positive={"loss_decay_gamma": self.loss_decay_gamma},
@@ -99,6 +104,7 @@ class DFlash2Objective:
             batch,
             num_anchors=self.num_anchors,
             attention_chunk_blocks=self.attention_chunk_blocks,
+            attention_trim_context=self.attention_trim_context,
         )
         output = model(
             blocks.input_ids,

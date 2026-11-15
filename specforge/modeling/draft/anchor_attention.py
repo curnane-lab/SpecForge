@@ -1,6 +1,6 @@
 """DFlash SDPA over groups of independent anchor blocks."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 
 import torch
@@ -26,6 +26,8 @@ class AnchorBlockMask:
     context_valid: Tensor | None = None
     input_offset: int = 0
     context_offset: int = 0
+    trim_context: bool = False
+    context_lengths: tuple[int, ...] | None = field(default=None, init=False)
 
     def __post_init__(self):
         for name in ("context_length", "block_size", "chunk_blocks"):
@@ -48,6 +50,22 @@ class AnchorBlockMask:
             or self.context_valid.device != self.anchors.device
         ):
             raise ValueError("context_valid must be boolean [batch, context_length]")
+        if type(self.trim_context) is not bool:
+            raise ValueError("trim_context must be boolean")
+        if self.trim_context:
+            limits = torch.where(
+                self.keep,
+                self.anchors + self.input_offset + self.context_offset,
+                0,
+            ).clamp(0, self.context_length)
+            group_size = min(self.chunk_blocks, limits.shape[1])
+            padding = (-limits.shape[1]) % group_size
+            if padding:
+                limits = F.pad(limits, (0, padding))
+            limits = limits.reshape(limits.shape[0], -1, group_size).amax(dim=(0, 2))
+            # Resolve Python slice bounds once per sampled batch. Layers and
+            # checkpoint replay share these bounds and perform no further D2H.
+            object.__setattr__(self, "context_lengths", tuple(limits.cpu().tolist()))
 
     @property
     def active_queries(self):
@@ -80,12 +98,15 @@ def _attention_chunk(
     scale,
     dropout_p,
     positions,
+    context_length,
 ):
     """Build tile-local masks and K/V inside the recomputation boundary."""
-    context = mask.context_length
+    context = context_length
     device = query.device
     q_indices = torch.arange(start, end, device=device)
-    key_indices = torch.cat((torch.arange(context, device=device), context + q_indices))
+    key_indices = torch.cat(
+        (torch.arange(context, device=device), mask.context_length + q_indices)
+    )
     batch = torch.arange(query.shape[0], device=device)[:, None, None]
     visible = mask(batch, None, q_indices[None, :, None], key_indices[None, None, :])
     if positions is None:
@@ -106,7 +127,9 @@ def _attention_chunk(
         key_positions = torch.cat(
             (
                 positions[1][:, :context],
-                positions[1][:, context + start : context + end],
+                positions[1][
+                    :, mask.context_length + start : mask.context_length + end
+                ],
             ),
             dim=1,
         )
@@ -120,10 +143,18 @@ def _attention_chunk(
     # Safe softmax on inactive rows, with zero outputs and gradients afterward.
     visible = visible[:, None] | ~active
     key = torch.cat(
-        (key[:, :, :context], key[:, :, context + start : context + end]), dim=2
+        (
+            key[:, :, :context],
+            key[:, :, mask.context_length + start : mask.context_length + end],
+        ),
+        dim=2,
     )
     value = torch.cat(
-        (value[:, :, :context], value[:, :, context + start : context + end]), dim=2
+        (
+            value[:, :, :context],
+            value[:, :, mask.context_length + start : mask.context_length + end],
+        ),
+        dim=2,
     )
     output = F.scaled_dot_product_attention(
         query,
@@ -151,8 +182,8 @@ def anchor_block_attention(
 ) -> Tensor:
     """Attend without a full-sequence mask or cross-block draft K/V work.
 
-    Each tile retains the shared context to avoid reading an anchor maximum
-    back to the host. Checkpointing regenerates masks and concatenated K/V in
+    Optional prefix bounds are resolved when the mask is constructed and shared
+    across layers. Checkpointing regenerates masks and concatenated K/V in
     backward, so autograd cannot retain their sum over all tiles. Dropout uses
     the checkpoint RNG state for replay. The caller supplies per-layer Q/K/V
     projections shared across tiles.
@@ -194,6 +225,11 @@ def anchor_block_attention(
             scale=scale,
             dropout_p=dropout_p,
             positions=positions,
+            context_length=(
+                mask.context_length
+                if mask.context_lengths is None
+                else mask.context_lengths[start // chunk_size]
+            ),
         )
         args = (query[:, :, start:end], key, value)
         outputs.append(

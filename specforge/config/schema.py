@@ -1050,6 +1050,8 @@ class TrainingConfig(StrictConfigModel):
     objective_chunk_blocks: int = Field(default=128, ge=0)
     #: SDPA anchor blocks per attention tile. Zero uses the dense mask path.
     attention_chunk_blocks: int = Field(default=0, ge=0, strict=True)
+    #: Resolve per-group context prefix bounds once on the host for anchor SDPA.
+    attention_trim_context: bool = Field(default=False, strict=True)
     #: Recompute each objective chunk during backward, independently of its backend.
     objective_checkpointing: bool = True
     loss_type: Literal[
@@ -1108,7 +1110,16 @@ class TrainingConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_training_shape(self):
-        if self.attention_chunk_blocks and self.attention_backend != "sdpa":
+        if self.attention_trim_context and not (
+            self.attention_chunk_blocks
+            or self.objective_options.get("attention_chunk_blocks")
+        ):
+            raise ValueError(
+                "training.attention_trim_context requires attention_chunk_blocks"
+            )
+        if (
+            self.attention_chunk_blocks or self.attention_trim_context
+        ) and self.attention_backend != "sdpa":
             raise ValueError(
                 "training.attention_chunk_blocks requires attention_backend=sdpa"
             )
@@ -1249,10 +1260,8 @@ class Config(StrictConfigModel):
             or self.resume is not None
         )
         if (
-            self.training.attention_chunk_blocks
-            and not canonical
-            and self.training.strategy != "dflash"
-        ):
+            self.training.attention_chunk_blocks or self.training.attention_trim_context
+        ) and (not canonical and self.training.strategy != "dflash"):
             raise ValueError("training.attention_chunk_blocks requires DFlash training")
         if canonical:
             if self.model.draft_model_config or self.model.draft_checkpoint_path:

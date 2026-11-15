@@ -36,6 +36,7 @@ COMMON_MODULES = ("backbone", "fusion", "embed_tokens", "lm_head")
 class DFlashObjective:
     num_anchors: int = 512
     attention_chunk_blocks: int = 0
+    attention_trim_context: bool = False
     loss_decay_gamma: float | None = None
 
     default_loss = TokenLoss(kind="ce")
@@ -46,6 +47,10 @@ class DFlashObjective:
         return decay_weighting(self.loss_decay_gamma)
 
     def __post_init__(self):
+        if type(self.attention_trim_context) is not bool:
+            raise ValueError("attention_trim_context must be boolean")
+        if self.attention_trim_context and not self.attention_chunk_blocks:
+            raise ValueError("attention_trim_context requires attention_chunk_blocks")
         check_options(
             counts={"num_anchors": self.num_anchors},
             zero_counts={"attention_chunk_blocks": self.attention_chunk_blocks},
@@ -59,6 +64,7 @@ class DFlashObjective:
             batch,
             num_anchors=self.num_anchors,
             attention_chunk_blocks=self.attention_chunk_blocks,
+            attention_trim_context=self.attention_trim_context,
         )
         output = model(
             blocks.input_ids,

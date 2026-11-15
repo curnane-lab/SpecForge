@@ -62,7 +62,12 @@ class AnchorTrainingTest(unittest.TestCase):
                     runtimes = [
                         build_objective_model(reference, options=options),
                         build_objective_model(
-                            actual, options={**options, "attention_chunk_blocks": 2}
+                            actual,
+                            options={
+                                **options,
+                                "attention_chunk_blocks": 2,
+                                "attention_trim_context": True,
+                            },
                         ),
                     ]
                     batch = training_batch(config)
@@ -113,6 +118,7 @@ class AnchorTrainingTest(unittest.TestCase):
                 )
                 actual = copy.deepcopy(reference)
                 actual.attention_chunk_blocks = 2
+                actual.attention_trim_context = True
                 features = torch.randn(2, 13, 64)
                 reference_features = features.clone().requires_grad_()
                 actual_features = features.clone().requires_grad_()
@@ -160,7 +166,8 @@ class AnchorTrainingTest(unittest.TestCase):
             actual.layer_inputs[0].attention_layout.visibility, AnchorBlockMask
         )
 
-    def test_legacy_config_build_passes_tile_size_to_the_training_model(self):
+    @patch("specforge.utils.get_local_device", return_value=torch.device("cpu"))
+    def test_legacy_config_build_passes_tile_size_to_the_training_model(self, _device):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = target_directory(root)
@@ -183,6 +190,7 @@ class AnchorTrainingTest(unittest.TestCase):
                         "strategy": "dflash",
                         "attention_backend": "sdpa",
                         "attention_chunk_blocks": 2,
+                        "attention_trim_context": True,
                     },
                 )
             )
@@ -195,9 +203,14 @@ class AnchorTrainingTest(unittest.TestCase):
                     resolved.config, algorithm=resolved.algorithm
                 )
             self.assertEqual(bundle.model.attention_chunk_blocks, 2)
+            self.assertEqual(next(bundle.draft_model.parameters()).device.type, "cpu")
             self.assertEqual(
                 bundle.strategy_kwargs.resume_contract["dflash_attention_backend"],
-                {"backend": "sdpa", "attention_chunk_blocks": 2},
+                {
+                    "backend": "sdpa",
+                    "attention_chunk_blocks": 2,
+                    "attention_trim_context": True,
+                },
             )
             self.assertIsInstance(
                 bundle.model._attention_mask(
@@ -206,7 +219,8 @@ class AnchorTrainingTest(unittest.TestCase):
                 AnchorBlockMask,
             )
 
-    def test_normal_config_resolution_build_and_resume_contract(self):
+    @patch("specforge.utils.get_local_device", return_value=torch.device("cpu"))
+    def test_normal_config_resolution_build_and_resume_contract(self, _device):
         with TemporaryDirectory() as tmp:
             target = target_directory(Path(tmp))
             for chunk in (0, 2):
@@ -216,6 +230,7 @@ class AnchorTrainingTest(unittest.TestCase):
                     training={
                         "attention_backend": "sdpa",
                         "attention_chunk_blocks": chunk,
+                        "attention_trim_context": bool(chunk),
                     },
                 )
                 resolved = resolve_run(cfg)
@@ -223,11 +238,18 @@ class AnchorTrainingTest(unittest.TestCase):
                     resolved.config, algorithm=resolved.algorithm
                 )
                 self.assertEqual(bundle.model.objective.attention_chunk_blocks, chunk)
+                self.assertEqual(
+                    bundle.model.objective.attention_trim_context, bool(chunk)
+                )
+                self.assertEqual(
+                    next(bundle.draft_model.parameters()).device.type, "cpu"
+                )
                 options = bundle.strategy_kwargs.resume_contract[
                     "canonical_objective_options"
                 ]
                 self.assertEqual(options.get("attention_chunk_blocks", 0), chunk)
                 self.assertEqual("attention_chunk_blocks" in options, bool(chunk))
+                self.assertEqual("attention_trim_context" in options, bool(chunk))
                 result = bundle.model(
                     training_batch(bundle.draft_model.config.draft),
                     step=1,
@@ -242,6 +264,14 @@ class AnchorTrainingTest(unittest.TestCase):
                 TrainingConfig(attention_backend="sdpa", attention_chunk_blocks=value)
         with self.assertRaisesRegex(ValueError, "attention_backend=sdpa"):
             TrainingConfig(attention_backend="eager", attention_chunk_blocks=2)
+        with self.assertRaisesRegex(ValueError, "requires attention_chunk_blocks"):
+            TrainingConfig(attention_backend="sdpa", attention_trim_context=True)
+        with self.assertRaisesRegex(ValueError, "attention_trim_context"):
+            TrainingConfig(
+                attention_backend="sdpa",
+                attention_chunk_blocks=2,
+                attention_trim_context=1,
+            )
         with TemporaryDirectory() as tmp:
             target = target_directory(Path(tmp))
             cfg = run_config(

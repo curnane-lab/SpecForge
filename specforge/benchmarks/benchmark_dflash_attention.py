@@ -35,7 +35,12 @@ def measure(args, tensors, anchors, keep, probe, chunk):
             tensor.grad = None
         if chunk:
             mask = AnchorBlockMask(
-                anchors, keep, args.context_length, args.block_size, chunk
+                anchors,
+                keep,
+                args.context_length,
+                args.block_size,
+                chunk,
+                trim_context=args.trim_context,
             )
             output = anchor_block_attention(
                 *tensors,
@@ -81,6 +86,7 @@ def measure(args, tensors, anchors, keep, probe, chunk):
     peak = None if accelerator is None else accelerator.max_memory_allocated(device)
     return dict(
         attention_chunk_blocks=chunk,
+        attention_trim_context=bool(chunk and args.trim_context),
         median_forward_backward_ms=statistics.median(durations),
         peak_allocated_bytes=peak,
         peak_above_resident_bytes=None if peak is None else peak - resident,
@@ -102,6 +108,11 @@ def main():
     parser.add_argument("--head-dim", type=int, default=64)
     parser.add_argument("--chunk-blocks", nargs="+", type=int, default=[4, 8, 16])
     parser.add_argument("--causal", action="store_true")
+    parser.add_argument(
+        "--trim-context",
+        action="store_true",
+        help="Resolve each tile's context prefix once on the host; timing includes the D2H boundary.",
+    )
     parser.add_argument("--window", type=int)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=10)

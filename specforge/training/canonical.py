@@ -364,15 +364,19 @@ def resolve_run(cfg, *, target_config=None):
             sorted(ignored),
         )
     options = dict(cfg.training.objective_options)
-    chunk_blocks = cfg.training.attention_chunk_blocks
-    if chunk_blocks:
-        if (
-            "attention_chunk_blocks" in options
-            and options["attention_chunk_blocks"] != chunk_blocks
-        ):
-            raise ValueError("conflicting attention_chunk_blocks settings")
-        options["attention_chunk_blocks"] = chunk_blocks
-    if options.get("attention_chunk_blocks", 0):
+    for name in ("attention_chunk_blocks", "attention_trim_context"):
+        value = getattr(cfg.training, name)
+        if value:
+            if name in options and options[name] != value:
+                raise ValueError(f"conflicting {name} settings")
+            options[name] = value
+    if options.get("attention_trim_context") and not options.get(
+        "attention_chunk_blocks"
+    ):
+        raise ValueError("attention_trim_context requires attention_chunk_blocks")
+    if options.get("attention_chunk_blocks", 0) or options.get(
+        "attention_trim_context"
+    ):
         if draft.architecture not in ("DFlashDraftModel", "DFlash2DraftModel"):
             raise ValueError(
                 "attention_chunk_blocks requires a DFlash or DFlash2 draft"
@@ -694,6 +698,8 @@ def build_bundle(cfg, algorithm):
     # Dense historical checkpoints predate this optional execution setting.
     if objective_options.get("attention_chunk_blocks") == 0:
         objective_options.pop("attention_chunk_blocks")
+    if objective_options.get("attention_trim_context") is False:
+        objective_options.pop("attention_trim_context")
     contract = {
         "canonical_draft_config": encode_config(draft),
         "canonical_objective": runtime.objective_name,

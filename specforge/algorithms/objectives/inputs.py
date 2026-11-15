@@ -81,6 +81,7 @@ def prepare_blocks(
     *,
     num_anchors=512,
     attention_chunk_blocks=0,
+    attention_trim_context=False,
     label_offset=0,
     input_offset=0,
     context_offset=0,
@@ -140,6 +141,7 @@ def prepare_blocks(
             context_valid=padding.bool(),
             input_offset=input_offset,
             context_offset=context_offset,
+            trim_context=attention_trim_context,
         )
     else:
         context_visible = (

@@ -78,16 +78,17 @@ ascend`. If a config leaves it at the flashinfer default, the launcher falls
 back to `ascend` automatically on Ascend hosts (flashinfer does not exist
 there).
 
-#### Anchor-chunked DFlash attention
+#### DFlash attention in anchor groups
 
 DFlash and DFlash2 training can bound SDPA attention intermediates with
-`training.attention_chunk_blocks`. Start with 32 anchor blocks per tile and
-measure the training step and peak allocated memory on your workload.
+`training.attention_chunk_blocks`. Use a nonzero tile size when attention memory
+limits the workload, and measure training-step time and peak allocated memory.
+The 910B3 measurements below provide initial tile choices for 8K and 32K context.
 
 ```yaml
 training:
   attention_backend: sdpa
-  attention_chunk_blocks: 32
+  attention_chunk_blocks: 64
 ```
 
 The setting works with the existing DFlash recipes and the canonical
@@ -100,12 +101,22 @@ resume contract.
 
 Each layer projects context and draft K/V once. A tile attends to shared context
 and its own group of draft blocks, preserving block isolation, layer causality
-and sliding windows. The implementation keeps the full context in each tile
-to avoid a device-to-host read of sampled anchor limits. Non-reentrant
+and sliding windows. By default each tile uses the full context. Non-reentrant
 checkpointing regenerates tile masks and concatenated K/V during backward,
 bounding these intermediates throughout the training step. It composes with
 draft-layer activation checkpointing. Dropout replay preserves each tile's RNG
 state. Numerical comparisons against dense SDPA use tolerances.
+
+`training.attention_trim_context: true` additionally limits each tile to the
+largest context prefix that its valid anchors can access. This option requires
+a nonzero `attention_chunk_blocks`. Prefix limits include all samples in the
+batch and are computed once when anchors are sampled, using one device-to-host
+transfer of the reduced bounds. All layers and backward replay reuse these
+Python slice bounds. The default is false. A full resume records this setting.
+
+The prefix option has CPU output/gradient coverage. NPU latency and memory
+measurements for this option are pending. Add `--trim-context` to the benchmark
+command to include prefix-bound construction and its synchronization in timing.
 
 Use this attention-only forward/backward benchmark to compare tile sizes.
 It includes mask construction and recomputation. Full training throughput and
@@ -117,6 +128,48 @@ python -m specforge.benchmarks.benchmark_dflash_attention \
   --context-length 8192 --num-anchors 512 --block-size 16 \
   --heads 32 --kv-heads 8 --head-dim 128 --chunk-blocks 16 32 64
 ```
+
+##### Reported 910B3 validation
+
+A validation run on Ascend 910B3 used the unmodified implementation at
+[`f321b7a`](https://github.com/curnane-lab/SpecForge/commit/f321b7ac4eaddc27c4c7f83a910a48ed4129ff3d).
+The supplied results report 89 tests passed and five skipped. All 48 BF16
+causal/window/tile/GQA combinations passed with padding and invalid anchors.
+Maximum absolute differences were zero for outputs and dQ, and 0.015625 for
+dK/dV. Legacy and canonical small-model forward/backward checks had equal losses
+and finite gradients, including samples with no valid anchors. The largest
+parameter-gradient differences were 1.22e-4 and 3.91e-3, respectively.
+
+The benchmark used batch size 2, 512 anchors, block size 16, 32 query heads,
+eight KV heads, head dimension 128 and BF16. Times include attention forward,
+backward, mask construction and tile recomputation, using two warmups and the
+median of five measurements. Peak allocation comes from
+`torch.npu.max_memory_allocated` and includes resident Q/K/V and gradients.
+
+| Context | Tile blocks | Forward/backward ms | Latency increase | Peak allocated GiB | Peak reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8K | 0 | 115.83 | baseline | 2.145 | baseline |
+| 8K | 16 | 229.34 | 98.0% | 1.384 | 35.4% |
+| 8K | 32 | 147.18 | 27.1% | 1.424 | 33.6% |
+| 8K | 64 | 122.54 | 5.8% | 1.496 | 30.2% |
+| 8K | 128 | 121.59 | 5.0% | 1.649 | 23.1% |
+| 8K | 256 | 133.81 | 15.5% | 1.840 | 14.2% |
+| 32K | 0 | 293.66 | baseline | 3.645 | baseline |
+| 32K | 16 | 628.49 | 114.0% | 2.521 | 30.8% |
+| 32K | 32 | 460.71 | 56.9% | 2.572 | 29.4% |
+| 32K | 64 | 389.11 | 32.5% | 2.668 | 26.8% |
+| 32K | 128 | 376.13 | 28.1% | 2.867 | 21.3% |
+
+These measurements establish a memory/latency tradeoff on 910B3. At 8K, a tile
+of 64 saved 30.2% of peak allocation with a 5.8% latency increase. At 32K, a tile
+of 32 approached the smallest measured allocation while completing faster than
+a tile of 16. The fastest measured 32K tile still increased latency by 28.1%.
+Keep the default zero when throughput is the objective and the dense run fits.
+
+Full Qwen3.5-4B training measurements are pending for training-step time, useful
+tokens/s, whole-device memory and the maximum usable batch size. Both dense
+attention cases completed in this benchmark, so resolving a full-training OOM
+requires validation with the affected training workload.
 
 ---
 
