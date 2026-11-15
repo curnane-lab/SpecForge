@@ -84,6 +84,13 @@ def resume_contract(_config, draft_model, training_model):
         "dflash_kl_scale": float(training_model.kl_scale),
         "dflash_kl_decay": float(training_model.kl_decay),
     }
+    if getattr(training_model, "attention_chunk_blocks", 0):
+        # The existing key also catches chunked-to-dense resumes. Historical
+        # dense checkpoints retain their original string-valued contract.
+        contract["dflash_attention_backend"] = {
+            "backend": str(training_model.attention_backend),
+            "attention_chunk_blocks": training_model.attention_chunk_blocks,
+        }
     if getattr(draft_model, "candidate_selector", None) is not None:
         method_config = dict(getattr(draft_model.config, "dflash_config", None) or {})
         contract.update(

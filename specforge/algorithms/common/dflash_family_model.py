@@ -12,6 +12,7 @@ from specforge.algorithms.common.dflash_metrics import hard_label_prefix_counts
 from specforge.core import fused_loss
 from specforge.core.chunking import checkpointed_chunk_reduce
 from specforge.core.position_weights import DPACE_LOSS_TYPES, dpace_weights
+from specforge.modeling.draft.anchor_attention import AnchorBlockMask
 from specforge.modeling.draft.dflash import DFlashDraftModel
 from specforge.modeling.draft.dflash_mask import (
     create_dflash_block_mask,
@@ -267,6 +268,7 @@ class OnlineDFlashModel(nn.Module):
         teacher_metrics: bool = True,
         fused_logits_loss: bool = True,
         objective_checkpointing: bool = True,
+        attention_chunk_blocks: int = 0,
     ):
         super().__init__()
         if metric_top_k <= 0:
@@ -279,6 +281,10 @@ class OnlineDFlashModel(nn.Module):
             raise ValueError(f"dpace_alpha must be in [0, 1], got {dpace_alpha}")
         if objective_chunk_blocks < 0:
             raise ValueError("objective_chunk_blocks must be >= 0")
+        if type(attention_chunk_blocks) is not int or attention_chunk_blocks < 0:
+            raise ValueError("attention_chunk_blocks must be a nonnegative integer")
+        if attention_chunk_blocks and attention_backend != "sdpa":
+            raise ValueError("attention_chunk_blocks requires attention_backend=sdpa")
         if selector_loss_alpha < 0:
             raise ValueError("selector_loss_alpha must be >= 0")
         if not 0.0 <= selector_warmup_ratio <= 1.0:
@@ -299,6 +305,7 @@ class OnlineDFlashModel(nn.Module):
         self.num_anchors = num_anchors
         self.loss_decay_gamma = loss_decay_gamma
         self.objective_chunk_blocks = int(objective_chunk_blocks)
+        self.attention_chunk_blocks = attention_chunk_blocks
         self.objective_checkpointing = objective_checkpointing
         self.loss_type = loss_type
         self.dpace_alpha = dpace_alpha
@@ -559,6 +566,14 @@ class OnlineDFlashModel(nn.Module):
         sequence_length: int,
     ):
         """Build training masks from the draft's layout and causal configuration."""
+        if self.attention_chunk_blocks:
+            return AnchorBlockMask(
+                anchors=anchor_positions,
+                keep=block_keep_mask,
+                context_length=sequence_length,
+                block_size=self.block_size,
+                chunk_blocks=self.attention_chunk_blocks,
+            )
         mask_builder = (
             create_dflash_block_mask
             if self.attention_backend == "flex_attention"

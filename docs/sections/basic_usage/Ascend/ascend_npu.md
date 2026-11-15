@@ -78,6 +78,46 @@ ascend`. If a config leaves it at the flashinfer default, the launcher falls
 back to `ascend` automatically on Ascend hosts (flashinfer does not exist
 there).
 
+#### Anchor-chunked DFlash attention
+
+DFlash and DFlash2 training can bound SDPA attention intermediates with
+`training.attention_chunk_blocks`. Start with 32 anchor blocks per tile and
+measure the training step and peak allocated memory on your workload.
+
+```yaml
+training:
+  attention_backend: sdpa
+  attention_chunk_blocks: 32
+```
+
+The setting works with the existing DFlash recipes and the canonical
+`draft`/`initialization` training entry. Canonical runs also accept the same
+setting in `training.objective_options`. Conflicting values are rejected.
+The default is zero. A nonzero value requires SDPA and a DFlash or DFlash2 draft.
+Resume records a nonzero tile size because changing attention call shapes can
+change floating-point rounding. A zero tile size uses the historical dense
+resume contract.
+
+Each layer projects context and draft K/V once. A tile attends to shared context
+and its own group of draft blocks, preserving block isolation, layer causality
+and sliding windows. The implementation keeps the full context in each tile
+to avoid a device-to-host read of sampled anchor limits. Non-reentrant
+checkpointing regenerates tile masks and concatenated K/V during backward,
+bounding these intermediates throughout the training step. It composes with
+draft-layer activation checkpointing. Dropout replay preserves each tile's RNG
+state. Numerical comparisons against dense SDPA use tolerances.
+
+Use this attention-only forward/backward benchmark to compare tile sizes.
+It includes mask construction and recomputation. Full training throughput and
+serving acceptance require separate measurements.
+
+```bash
+python -m specforge.benchmarks.benchmark_dflash_attention \
+  --device npu --dtype bfloat16 --batch-size 2 \
+  --context-length 8192 --num-anchors 512 --block-size 16 \
+  --heads 32 --kv-heads 8 --head-dim 128 --chunk-blocks 16 32 64
+```
+
 ---
 
 ## 2. Data preparation

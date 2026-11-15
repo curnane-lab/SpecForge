@@ -363,6 +363,27 @@ def resolve_run(cfg, *, target_config=None):
             "their default values do not enable chunking, checkpointing or fused loss",
             sorted(ignored),
         )
+    options = dict(cfg.training.objective_options)
+    chunk_blocks = cfg.training.attention_chunk_blocks
+    if chunk_blocks:
+        if (
+            "attention_chunk_blocks" in options
+            and options["attention_chunk_blocks"] != chunk_blocks
+        ):
+            raise ValueError("conflicting attention_chunk_blocks settings")
+        options["attention_chunk_blocks"] = chunk_blocks
+    if options.get("attention_chunk_blocks", 0):
+        if draft.architecture not in ("DFlashDraftModel", "DFlash2DraftModel"):
+            raise ValueError(
+                "attention_chunk_blocks requires a DFlash or DFlash2 draft"
+            )
+        if cfg.training.attention_backend != "sdpa":
+            raise ValueError("attention_chunk_blocks requires attention_backend=sdpa")
+    cfg = cfg.model_copy(
+        update={
+            "training": cfg.training.model_copy(update={"objective_options": options})
+        }
+    )
     resolved = resolve_objective(draft.architecture, **_objective_settings(cfg))
     _validate_imported_objective(cfg, resolved)
     from specforge.config.schema import ModelConfig
@@ -669,10 +690,14 @@ def build_bundle(cfg, algorithm):
         )
     )
     runtime.fsdp_param_dtype = dtype
+    objective_options = asdict(runtime.objective)
+    # Dense historical checkpoints predate this optional execution setting.
+    if objective_options.get("attention_chunk_blocks") == 0:
+        objective_options.pop("attention_chunk_blocks")
     contract = {
         "canonical_draft_config": encode_config(draft),
         "canonical_objective": runtime.objective_name,
-        "canonical_objective_options": asdict(runtime.objective),
+        "canonical_objective_options": objective_options,
         "canonical_use_liger_kernel": use_liger,
         "canonical_frozen": tuple(sorted(set(cfg.training.frozen))),
         "canonical_loss": asdict(runtime.token_loss),

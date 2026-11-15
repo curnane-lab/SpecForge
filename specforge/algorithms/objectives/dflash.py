@@ -19,6 +19,7 @@ COMMON_MODULES = ("backbone", "fusion", "embed_tokens", "lm_head")
         capture_method="dflash",
         minimum_loss_tokens=2,
         loss_mask_filter=has_consecutive_supervised_tokens,
+        attention_backends=frozenset({"eager", "sdpa"}),
     ),
     architectures=("DFlashDraftModel",),
     inputs=("input_ids", "hidden_states", "loss_mask"),
@@ -34,6 +35,7 @@ COMMON_MODULES = ("backbone", "fusion", "embed_tokens", "lm_head")
 @dataclass
 class DFlashObjective:
     num_anchors: int = 512
+    attention_chunk_blocks: int = 0
     loss_decay_gamma: float | None = None
 
     default_loss = TokenLoss(kind="ce")
@@ -46,6 +48,7 @@ class DFlashObjective:
     def __post_init__(self):
         check_options(
             counts={"num_anchors": self.num_anchors},
+            zero_counts={"attention_chunk_blocks": self.attention_chunk_blocks},
             positive={"loss_decay_gamma": self.loss_decay_gamma},
         )
 
@@ -55,6 +58,7 @@ class DFlashObjective:
             model.config.draft,
             batch,
             num_anchors=self.num_anchors,
+            attention_chunk_blocks=self.attention_chunk_blocks,
         )
         output = model(
             blocks.input_ids,

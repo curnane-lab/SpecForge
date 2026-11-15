@@ -19,6 +19,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 from typing_extensions import Tuple, Unpack
 
+from .anchor_attention import AnchorBlockMask, anchor_block_attention
 from .dflash_kernels import DEFAULT_DFLASH_KERNELS, DFlashKernels
 from .dflash_mask import (
     create_dflash_block_mask,
@@ -324,13 +325,32 @@ class Qwen3DFlashAttentionBase(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         bsz, q_len = hidden_states.shape[:-1]
+        if isinstance(attention_mask, AnchorBlockMask) and (
+            self.config._attn_implementation != "sdpa" or past_key_values is not None
+        ):
+            raise ValueError(
+                "anchor attention requires SDPA training without a KV cache"
+            )
         q, k, v = self._compute_qkv(hidden_states, target_hidden, position_embeddings)
         if past_key_values is not None:
             cos, sin = position_embeddings
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         valid_queries = None
-        if self.config._attn_implementation == "flex_attention":
+        if isinstance(attention_mask, AnchorBlockMask):
+            attn_output = anchor_block_attention(
+                q,
+                k,
+                v,
+                attention_mask,
+                is_causal=self.is_causal,
+                sliding_window=self.sliding_window,
+                scale=self.scaling,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+            ).transpose(1, 2)
+            valid_queries = attention_mask.active_queries[:, None, :, None]
+            attn_weights = None
+        elif self.config._attn_implementation == "flex_attention":
             kernel_options = dict(kwargs.pop("kernel_options", None) or {})
             backend = flex_attention_backend()
             if backend is not None:

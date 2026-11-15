@@ -1048,6 +1048,8 @@ class TrainingConfig(StrictConfigModel):
     loss_decay_gamma: Optional[float] = None
     #: Anchor blocks per objective slice; 0 treats the whole objective as one chunk.
     objective_chunk_blocks: int = Field(default=128, ge=0)
+    #: SDPA anchor blocks per attention tile. Zero uses the dense mask path.
+    attention_chunk_blocks: int = Field(default=0, ge=0, strict=True)
     #: Recompute each objective chunk during backward, independently of its backend.
     objective_checkpointing: bool = True
     loss_type: Literal[
@@ -1106,6 +1108,10 @@ class TrainingConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_training_shape(self):
+        if self.attention_chunk_blocks and self.attention_backend != "sdpa":
+            raise ValueError(
+                "training.attention_chunk_blocks requires attention_backend=sdpa"
+            )
         if not 0.0 <= self.dpace_alpha <= 1.0:
             raise ValueError("training.dpace_alpha must be in [0, 1]")
         if not 0.0 < self.down_sample_ratio <= 1.0:
@@ -1242,6 +1248,12 @@ class Config(StrictConfigModel):
             or self.initialization is not None
             or self.resume is not None
         )
+        if (
+            self.training.attention_chunk_blocks
+            and not canonical
+            and self.training.strategy != "dflash"
+        ):
+            raise ValueError("training.attention_chunk_blocks requires DFlash training")
         if canonical:
             if self.model.draft_model_config or self.model.draft_checkpoint_path:
                 raise ValueError(

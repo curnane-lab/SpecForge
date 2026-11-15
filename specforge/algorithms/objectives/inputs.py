@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from specforge.modeling.draft.anchor_attention import AnchorBlockMask
 from specforge.modeling.draft.layers.attention.masks import AttentionLayout
 from specforge.modeling.draft.layers.inputs import LayerInputs
 
@@ -79,6 +80,7 @@ def prepare_blocks(
     batch,
     *,
     num_anchors=512,
+    attention_chunk_blocks=0,
     label_offset=0,
     input_offset=0,
     context_offset=0,
@@ -127,23 +129,40 @@ def prepare_blocks(
     query = positions.flatten(1)
     context = torch.arange(ids.shape[1], device=ids.device).expand(ids.shape[0], -1)
     keys = torch.cat((context, query), dim=1)
-    context_visible = (
-        context[:, None, None, :]
-        < (anchors + input_offset + context_offset)[..., None, None]
-    )
     padding = batch.get("attention_mask", torch.ones_like(ids, dtype=torch.bool))
-    context_visible = context_visible & padding[:, None, None, :].bool()
-    context_visible = context_visible.expand(-1, -1, size, -1).reshape(
-        ids.shape[0], -1, ids.shape[1]
-    )
-    block_ids = torch.arange(count, device=ids.device).repeat_interleave(size)
-    draft_visible = (block_ids[:, None] == block_ids[None, :]).expand(
-        ids.shape[0], -1, -1
-    )
-    visible = torch.cat((context_visible, draft_visible), dim=-1)
-    visible &= keep.repeat_interleave(size, dim=1)[..., None]
+    if attention_chunk_blocks:
+        visible = AnchorBlockMask(
+            anchors,
+            keep,
+            ids.shape[1],
+            size,
+            attention_chunk_blocks,
+            context_valid=padding.bool(),
+            input_offset=input_offset,
+            context_offset=context_offset,
+        )
+    else:
+        context_visible = (
+            context[:, None, None, :]
+            < (anchors + input_offset + context_offset)[..., None, None]
+        )
+        context_visible = context_visible & padding[:, None, None, :].bool()
+        context_visible = context_visible.expand(-1, -1, size, -1).reshape(
+            ids.shape[0], -1, ids.shape[1]
+        )
+        block_ids = torch.arange(count, device=ids.device).repeat_interleave(size)
+        draft_visible = (block_ids[:, None] == block_ids[None, :]).expand(
+            ids.shape[0], -1, -1
+        )
+        visible = torch.cat((context_visible, draft_visible), dim=-1)
+        visible &= keep.repeat_interleave(size, dim=1)[..., None]
     layout = AttentionLayout(
-        query_positions=query, key_positions=keys, visibility=visible[:, None]
+        query_positions=query,
+        key_positions=keys,
+        visibility=visible if attention_chunk_blocks else visible[:, None],
+        active_queries=(
+            keep.repeat_interleave(size, dim=1) if attention_chunk_blocks else None
+        ),
     )
     entries = tuple(
         LayerInputs(position_ids=keys, attention_layout=layout)

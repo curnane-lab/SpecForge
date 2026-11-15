@@ -20,6 +20,7 @@ from .registry import TrainingRequirements, register_protocol
         capture_method="dflash",
         minimum_loss_tokens=2,
         loss_mask_filter=has_consecutive_supervised_tokens,
+        attention_backends=frozenset({"eager", "sdpa"}),
     ),
     architectures=("DFlash2DraftModel",),
     inputs=("input_ids", "hidden_states", "loss_mask"),
@@ -35,6 +36,7 @@ from .registry import TrainingRequirements, register_protocol
 @dataclass
 class DFlash2Objective:
     num_anchors: int = 512
+    attention_chunk_blocks: int = 0
     loss_decay_gamma: float | None = None
     selector_loss_alpha: float = 1.0
     selector_warmup_steps: int | None = None
@@ -60,6 +62,7 @@ class DFlash2Objective:
                 "selector_ramp_ratio": self.selector_ramp_ratio,
             },
             zero_counts={
+                "attention_chunk_blocks": self.attention_chunk_blocks,
                 "selector_warmup_steps": self.selector_warmup_steps,
                 "selector_ramp_steps": self.selector_ramp_steps,
             },
@@ -95,6 +98,7 @@ class DFlash2Objective:
             model.config.draft,
             batch,
             num_anchors=self.num_anchors,
+            attention_chunk_blocks=self.attention_chunk_blocks,
         )
         output = model(
             blocks.input_ids,

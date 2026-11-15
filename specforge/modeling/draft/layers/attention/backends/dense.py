@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from torch import Tensor
 from torch.nn import functional as F
 
+from ....anchor_attention import AnchorBlockMask, anchor_block_attention
 from ..masks import dense_attention_mask
 from .base import AttentionBackend
 from .eager import eager_attention
@@ -16,8 +17,18 @@ class DenseMask:
     empty_rows: Tensor
 
 
+@dataclass(frozen=True, eq=False)
+class AnchorMask:
+    blocks: AnchorBlockMask
+    positions: tuple[Tensor, Tensor]
+    is_causal: bool
+    sliding_window: int | None
+
+
 class DenseAttentionBackend(AttentionBackend):
     def prepare(self, layout, *, batch_size, num_heads, is_causal, sliding_window):
+        if isinstance(layout.visibility, AnchorBlockMask):
+            raise ValueError("anchor block attention requires the sdpa backend")
         mask = dense_attention_mask(
             layout,
             batch_size=batch_size,
@@ -59,6 +70,33 @@ class EagerAttentionBackend(DenseAttentionBackend):
 
 class SDPAAttentionBackend(DenseAttentionBackend):
     def prepare(self, layout, **options):
+        if isinstance(layout.visibility, AnchorBlockMask):
+            blocks = layout.visibility
+            batch = options["batch_size"]
+            queries = blocks.anchors.shape[1] * blocks.block_size
+            if (
+                blocks.anchors.shape[0] != batch
+                or layout.query_positions.shape[1] != queries
+                or layout.key_positions.shape[1] != blocks.context_length + queries
+            ):
+                raise ValueError(
+                    "anchor block metadata must match the attention layout"
+                )
+            active = blocks.active_queries
+            if layout.active_queries is not None:
+                active = active & layout.active_queries
+            return (
+                AnchorMask(
+                    blocks,
+                    (
+                        layout.query_positions.expand(batch, -1),
+                        layout.key_positions.expand(batch, -1),
+                    ),
+                    options["is_causal"],
+                    layout._resolve_window(options["sliding_window"]),
+                ),
+                active,
+            )
         mask, active = super().prepare(layout, **options)
         # Prepare once per forward. Avoid undefined softmax/backward on empty rows.
         return DenseMask(mask.visibility | mask.empty_rows, mask.empty_rows), active
@@ -69,7 +107,7 @@ class SDPAAttentionBackend(DenseAttentionBackend):
         key,
         value,
         *,
-        mask: DenseMask,
+        mask: DenseMask | AnchorMask,
         scale,
         dropout_p,
         training,
@@ -78,6 +116,21 @@ class SDPAAttentionBackend(DenseAttentionBackend):
         if return_lse:
             raise NotImplementedError(
                 "SDPA does not expose attention LSE; use eager or Flex"
+            )
+        if isinstance(mask, AnchorMask):
+            return (
+                anchor_block_attention(
+                    query,
+                    key,
+                    value,
+                    mask.blocks,
+                    is_causal=mask.is_causal,
+                    sliding_window=mask.sliding_window,
+                    scale=scale,
+                    dropout_p=dropout_p if training else 0.0,
+                    positions=mask.positions,
+                ),
+                None,
             )
         output = F.scaled_dot_product_attention(
             query,
