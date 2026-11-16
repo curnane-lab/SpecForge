@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from specforge.core.indexed_loss import indexed_l1_loss
+from specforge.core.teacher_projection import IndexedTeacherLogits
 from specforge.data.loss_mask import has_consecutive_supervised_tokens
 
 from .base import check_options
@@ -41,6 +43,8 @@ class DSparkObjective:
     ce_loss_alpha: float = 0.1
     l1_loss_alpha: float = 0.9
     confidence_loss_alpha: float = 1.0
+    deduplicate_teacher_positions: bool = False
+    objective_chunk_size: int = 0
 
     default_weighting_options = ("loss_decay_gamma",)
     default_loss_options = ("ce_loss_alpha", "l1_loss_alpha")
@@ -61,8 +65,11 @@ class DSparkObjective:
         )
 
     def __post_init__(self):
+        if type(self.deduplicate_teacher_positions) is not bool:
+            raise ValueError("deduplicate_teacher_positions must be a bool")
         check_options(
             counts={"num_anchors": self.num_anchors},
+            zero_counts={"objective_chunk_size": self.objective_chunk_size},
             positive={"loss_decay_gamma": self.loss_decay_gamma},
             nonnegative={
                 "ce_loss_alpha": self.ce_loss_alpha,
@@ -70,6 +77,12 @@ class DSparkObjective:
                 "confidence_loss_alpha": self.confidence_loss_alpha,
             },
         )
+
+    def validate_loss(self, loss):
+        if self.deduplicate_teacher_positions and loss.kind not in ("ce", "ce_l1"):
+            raise ValueError(
+                "DSpark teacher-position deduplication supports ce and ce_l1 losses"
+            )
 
     def __call__(self, runtime, batch, **context):
         model = runtime.draft_model
@@ -94,12 +107,16 @@ class DSparkObjective:
                 return AuxiliaryLoss(weights.new_zeros(weights.shape))
             with torch.no_grad():
                 distance = (
-                    (
-                        projected["logits"].float().softmax(-1)
-                        - teacher.float().softmax(-1)
+                    indexed_l1_loss(projected["logits"], teacher)
+                    if isinstance(teacher, IndexedTeacherLogits)
+                    else (
+                        (
+                            projected["logits"].float().softmax(-1)
+                            - teacher.float().softmax(-1)
+                        )
+                        .abs()
+                        .sum(-1)
                     )
-                    .abs()
-                    .sum(-1)
                 )
                 acceptance = (1 - distance / 2).clamp(0, 1)
             return AuxiliaryLoss(
@@ -117,5 +134,10 @@ class DSparkObjective:
             auxiliary=auxiliary,
             requires=frozenset({"teacher_logits"}),
             default_loss=self.default_loss,
+            deduplicate_teacher_positions=self.deduplicate_teacher_positions,
         )
-        return PredictionBatch((predictions,), reduction="global_microbatch")
+        return PredictionBatch(
+            (predictions,),
+            reduction="global_microbatch",
+            chunk_size=self.objective_chunk_size,
+        )

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from specforge.core.position_weights import DPACE_LOSS_TYPES, dpace_weights
+from specforge.core.teacher_projection import IndexedTeacherLogits
 
 from .base import ObjectiveResult, microbatch_mean
 from .losses import LossContext
@@ -13,8 +14,8 @@ from .losses import LossContext
 @dataclass
 class Projected:
     output: dict
-    teacher: torch.Tensor | None
-    full_teacher: torch.Tensor | None
+    teacher: torch.Tensor | IndexedTeacherLogits | None
+    full_teacher: torch.Tensor | IndexedTeacherLogits | None
     labels: torch.Tensor
     mask: torch.Tensor
     teacher_mass: torch.Tensor | None

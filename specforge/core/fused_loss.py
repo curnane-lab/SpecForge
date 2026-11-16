@@ -88,6 +88,9 @@ _OP_RKL = 1
 _OP_JSD = 2
 _OP_CE = 3
 _OP_TV = 4
+# Explicit L1 uses the zero subgradient at equal probabilities (DSpark's
+# torch.abs reference), rather than reusing TV's overlap subgradient.
+_OP_L1 = 5
 
 # stats [_N_STATS, n_rows]: [0]/[1] draft row max / sum-exp, [2]/[3] same for
 # targets (unused by ce), [4] per-OP -- kl_div/rkl: row loss L | jsd:
@@ -160,6 +163,8 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
     n_cols,
     OP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    target_rows_ptr=None,
+    INDEXED_TARGETS: tl.constexpr = False,
 ):
     """One row per program: online softmax stats, then the OP's reduction.
 
@@ -168,7 +173,8 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
     """
     pid = tl.program_id(0).to(tl.int64)
     logits_ptr += pid * n_cols
-    targets_ptr += pid * n_cols
+    target_row = tl.load(target_rows_ptr + pid) if INDEXED_TARGETS else pid
+    targets_ptr += target_row * n_cols
 
     m_d, z_d = _online_stats(logits_ptr, n_cols, BLOCK_SIZE)
     lse_d = m_d + tl.log(z_d)
@@ -212,6 +218,11 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
             ltp = y - lse_t
             dp = tl.exp(ldp)
             tp = tl.exp(ltp)
+            if OP == _OP_L1:
+                # Subtract the maximum before division, avoiding cancellation
+                # for large, nearly equal logits. Keep exact ties at zero.
+                dp = tl.exp(x - m_d) / z_d
+                tp = tl.exp(y - m_t) / z_t
             if OP == _OP_KL:
                 acc += tl.sum(tl.where(mask, tp * (ltp - ldp), 0.0))
             elif OP == _OP_RKL:
@@ -223,6 +234,10 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
             elif OP == _OP_TV:
                 acc += tl.sum(tl.where(mask, tl.minimum(dp, tp), 0.0))
                 extra += tl.sum(tl.where(mask & (dp <= tp), dp, 0.0))
+            elif OP == _OP_L1:
+                sign = (dp > tp).to(tl.float32) - (dp < tp).to(tl.float32)
+                acc += tl.sum(tl.where(mask, tl.abs(dp - tp), 0.0))
+                extra += tl.sum(tl.where(mask, dp * sign, 0.0))
 
         # Lint exemptions: `in`/merged compares aren't constexpr-foldable here.
         if OP == _OP_KL or OP == _OP_RKL:  # noqa: PLR1714, SIM109
@@ -233,6 +248,9 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
             tl.store(stats_ptr + 4 * stats_row + pid, acc)
         elif OP == _OP_TV:
             tl.store(loss_ptr + pid, 1.0 - acc)
+            tl.store(stats_ptr + 4 * stats_row + pid, extra)
+        elif OP == _OP_L1:
+            tl.store(loss_ptr + pid, acc)
             tl.store(stats_ptr + 4 * stats_row + pid, extra)
 
 
@@ -246,6 +264,8 @@ def loss_backward_kernel(
     n_cols,
     OP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    target_rows_ptr=None,
+    INDEXED_TARGETS: tl.constexpr = False,
 ):
     """Recompute probabilities from the saved stats and apply the OP gradient."""
     pid = tl.program_id(0).to(tl.int64)
@@ -266,7 +286,8 @@ def loss_backward_kernel(
     extra = tl.load(stats_ptr + 4 * stats_row + pid)
     if OP != _OP_CE:
         # CE passes None for targets_ptr.
-        targets_ptr += pid * n_cols
+        target_row = tl.load(target_rows_ptr + pid) if INDEXED_TARGETS else pid
+        targets_ptr += target_row * n_cols
         m_t = tl.load(stats_ptr + 2 * stats_row + pid)
         z_t = tl.load(stats_ptr + 3 * stats_row + pid)
         lse_t = m_t + tl.log(z_t)
@@ -293,6 +314,11 @@ def loss_backward_kernel(
                 grad = 0.5 * dp * (ldp - _log_mix(ldp, ltp) - extra)
             elif OP == _OP_TV:
                 grad = -dp * ((dp <= tp).to(tl.float32) - extra)
+            elif OP == _OP_L1:
+                dp = tl.exp(x - m_d) / z_d
+                tp = tl.exp(y - m_t) / z_t
+                sign = (dp > tp).to(tl.float32) - (dp < tp).to(tl.float32)
+                grad = dp * (sign - extra)
         tl.store(grad_in_ptr + offsets, go * grad, mask=mask)
 
 
@@ -327,6 +353,7 @@ def _require_triton():
     module_globals["_OP_JSD"] = tl.constexpr(_OP_JSD)
     module_globals["_OP_CE"] = tl.constexpr(_OP_CE)
     module_globals["_OP_TV"] = tl.constexpr(_OP_TV)
+    module_globals["_OP_L1"] = tl.constexpr(_OP_L1)
     module_globals["_online_stats"] = triton.jit(_online_stats)
     module_globals["_log_mix"] = triton.jit(_log_mix)
     module_globals["loss_forward_kernel"] = triton.jit(loss_forward_kernel)

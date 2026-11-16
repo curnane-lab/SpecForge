@@ -83,6 +83,7 @@ class ObjectiveModel(nn.Module):
         sequence_ids=None,
         projection_inputs=None,
         auxiliary_inputs=None,
+        deduplicate_teacher_positions=False,
         **options,
     ):
         from .inputs import gather
@@ -92,7 +93,22 @@ class ObjectiveModel(nn.Module):
             return value.reshape(-1, unit_size, *value.shape[mask.ndim :])
 
         teacher = None
-        if "target_logits" in batch:
+        if deduplicate_teacher_positions and (
+            "target_logits" in batch
+            or (self.target_head is not None and "target_last_hidden_states" in batch)
+        ):
+            from specforge.core.teacher_projection import teacher_position_keys
+
+            preprojected = "target_logits" in batch
+            source = batch[
+                "target_logits" if preprojected else "target_last_hidden_states"
+            ].detach()
+            teacher = Teacher(
+                align(teacher_position_keys(source, teacher_positions)),
+                head=None if preprojected else self.target_head,
+                source=source,
+            )
+        elif "target_logits" in batch:
             teacher = Teacher(
                 align(gather(batch["target_logits"], teacher_positions)).detach()
             )

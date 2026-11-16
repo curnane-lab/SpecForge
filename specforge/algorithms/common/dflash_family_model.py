@@ -12,6 +12,11 @@ from specforge.algorithms.common.dflash_metrics import hard_label_prefix_counts
 from specforge.core import fused_loss
 from specforge.core.chunking import checkpointed_chunk_reduce
 from specforge.core.position_weights import DPACE_LOSS_TYPES, dpace_weights
+from specforge.core.teacher_projection import (
+    IndexedTeacherLogits,
+    project_teacher_positions,
+    teacher_position_keys,
+)
 from specforge.modeling.draft.dflash import DFlashDraftModel
 from specforge.modeling.draft.dflash_mask import (
     create_dflash_block_mask,
@@ -713,9 +718,19 @@ class OnlineDFlashModel(nn.Module):
         logits: torch.Tensor,
         target_ids: torch.Tensor,
         *,
-        teacher_logits: Optional[torch.Tensor] = None,
+        teacher_logits: Optional[torch.Tensor | IndexedTeacherLogits] = None,
         top_k: int = 0,
     ) -> fused_loss.CEL1Loss:
+        if isinstance(teacher_logits, IndexedTeacherLogits):
+            from specforge.core.indexed_loss import indexed_ce_l1_loss
+
+            return indexed_ce_l1_loss(
+                logits,
+                target_ids,
+                teacher_logits=teacher_logits,
+                top_k=top_k,
+                fused=self.fused_logits_loss,
+            )
         loss_fn = (
             fused_loss.fused_ce_l1_loss
             if self._logits_loss_backend(logits) == "fused"
@@ -1918,6 +1933,7 @@ class OnlineDSparkModel(OnlineDFlashModel):
         objective_chunk_blocks: int = 128,
         fused_logits_loss: bool = True,
         objective_checkpointing: bool = True,
+        deduplicate_teacher_positions: bool = False,
     ):
         super().__init__(
             draft_model=draft_model,
@@ -1943,6 +1959,9 @@ class OnlineDSparkModel(OnlineDFlashModel):
         self.dspark_ce_loss_alpha = float(dspark_ce_loss_alpha)
         self.dspark_l1_loss_alpha = float(dspark_l1_loss_alpha)
         self.dspark_confidence_head_alpha = float(dspark_confidence_head_alpha)
+        if type(deduplicate_teacher_positions) is not bool:
+            raise ValueError("deduplicate_teacher_positions must be a bool")
+        self.deduplicate_teacher_positions = deduplicate_teacher_positions
 
     def _build_dspark_labels_and_mask(
         self,
@@ -2000,10 +2019,11 @@ class OnlineDSparkModel(OnlineDFlashModel):
         target_ids: torch.Tensor,
         loss_weights: torch.Tensor,
         eval_mask: torch.Tensor,
-        aligned_target_hidden: Optional[torch.Tensor],
+        teacher_inputs: Optional[torch.Tensor],
         block_index: Optional[torch.Tensor] = None,
         *,
         total_blocks: int = 0,
+        teacher_source: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ...]:
         """Return additive loss and telemetry numerators for one block slice."""
 
@@ -2013,9 +2033,15 @@ class OnlineDSparkModel(OnlineDFlashModel):
             hidden_states=hidden,
         )
         target_logits = None
-        if aligned_target_hidden is not None:
+        if teacher_inputs is not None:
             with torch.no_grad():
-                target_logits = self._project_logits(aligned_target_hidden)
+                target_logits = (
+                    self._project_logits(teacher_inputs)
+                    if teacher_source is None
+                    else project_teacher_positions(
+                        teacher_source, teacher_inputs, self.lm_head
+                    )
+                )
         terms = self._logits_loss_terms(
             draft_logits, target_ids, teacher_logits=target_logits
         )
@@ -2066,7 +2092,7 @@ class OnlineDSparkModel(OnlineDFlashModel):
             walk_accepted = _scatter_accepted_prefix(
                 predicted_ids, target_ids, eval_mask, block_index, total_blocks
             )
-            if aligned_target_hidden is not None:
+            if teacher_inputs is not None:
                 teacher_agreement_num = (
                     (predicted_ids == teacher_ids).float() * eval_mask
                 ).sum()
@@ -2124,25 +2150,35 @@ class OnlineDSparkModel(OnlineDFlashModel):
             self.dspark_confidence_head_alpha > 0
             and getattr(self.draft_model, "confidence_head", None) is not None
         )
-        aligned_target_hidden = None
+        teacher_inputs = teacher_source = None
         if need_target:
             if target_last_hidden_states is None:
                 raise ValueError(
                     "DSpark L1/confidence loss requires target_last_hidden_states"
                 )
-            aligned_target_hidden = self._aligned_target_hidden(
-                target_last_hidden_states,
-                safe_label_indices,
-            )
+            if self.deduplicate_teacher_positions:
+                teacher_source = target_last_hidden_states.detach()
+                teacher_inputs = teacher_position_keys(
+                    teacher_source, safe_label_indices - 1
+                )
+            else:
+                teacher_inputs = self._aligned_target_hidden(
+                    target_last_hidden_states,
+                    safe_label_indices,
+                )
 
         totals = checkpointed_chunk_reduce(
-            partial(self._dspark_objective_chunk_terms, total_blocks=num_blocks),
+            partial(
+                self._dspark_objective_chunk_terms,
+                total_blocks=num_blocks,
+                teacher_source=teacher_source,
+            ),
             hidden_4d,
             prev_token_ids,
             target_ids,
             loss_weights,
             eval_mask,
-            aligned_target_hidden,
+            teacher_inputs,
             (
                 torch.arange(num_blocks, device=target_ids.device).unsqueeze(0)
                 if collect_detailed_metrics
@@ -2210,7 +2246,7 @@ class OnlineDSparkModel(OnlineDFlashModel):
             "ce_position": (ce_position_num, position_den),
             "accuracy_position": (correct_position_num, position_den),
         }
-        if aligned_target_hidden is not None:
+        if need_target:
             ratio_metrics.update(
                 {
                     "teacher_agreement": (teacher_agreement_num, eval_den),

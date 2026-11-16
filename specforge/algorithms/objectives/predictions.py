@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 import torch
 from torch import Tensor
 
+from specforge.core.teacher_projection import project_teacher_positions
+
 from .losses import TokenLoss
 
 
@@ -13,9 +15,12 @@ from .losses import TokenLoss
 class Teacher:
     values: Tensor
     head: Callable | None = None
+    source: Tensor | None = None
 
     def logits(self):
         with torch.no_grad():
+            if self.source is not None:
+                return project_teacher_positions(self.source, self.values, self.head)
             return self.head(self.values) if self.head is not None else self.values
 
     def select(self, units):

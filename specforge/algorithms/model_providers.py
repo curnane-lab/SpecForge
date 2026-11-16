@@ -449,6 +449,7 @@ def build_dspark_model(
             dspark_l1_loss_alpha=cfg.training.dspark_l1_loss_alpha,
             fused_logits_loss=cfg.training.fused_logits_loss,
             dspark_confidence_head_alpha=(cfg.training.dspark_confidence_head_alpha),
+            deduplicate_teacher_positions=cfg.training.deduplicate_teacher_positions,
         ),
     )
 

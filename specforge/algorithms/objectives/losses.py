@@ -61,7 +61,15 @@ def soft_cross_entropy(logits, labels, teacher):
 
 @register_loss("ce_l1", requires=("logits", "labels", "teacher_logits"))
 def ce_l1(logits, labels, teacher, *, ce_weight=0.1, l1_weight=0.9):
-    terms = fused_loss.ce_l1_loss(logits, labels, teacher_logits=teacher)
+    from specforge.core.indexed_loss import indexed_ce_l1_loss
+    from specforge.core.teacher_projection import IndexedTeacherLogits
+
+    compute = (
+        indexed_ce_l1_loss
+        if isinstance(teacher, IndexedTeacherLogits)
+        else fused_loss.ce_l1_loss
+    )
+    terms = compute(logits, labels, teacher_logits=teacher)
     return ce_weight * terms.cross_entropy + l1_weight * terms.teacher_l1
 
 

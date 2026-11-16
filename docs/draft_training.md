@@ -232,6 +232,9 @@ configuration and is recorded in the training resume contract.
 
 MTP accepts `objective_chunk_size` through objective options and maps the legacy
 `mtp_objective_chunk_size` alias to it; projection and loss are checkpointed in chunks.
+DSpark also accepts `objective_chunk_size` and the opt-in
+`deduplicate_teacher_positions` through objective options; see
+[teacher-position deduplication](sections/advanced_features/dspark_teacher_dedup.md).
 Other canonical objectives do not consume legacy `objective_chunk_blocks`,
 `objective_checkpointing`, `fused_logits_loss`, `mtp_objective_chunk_size` or
 `trim_loss_positions`. Non-default values fail validation; explicitly supplied

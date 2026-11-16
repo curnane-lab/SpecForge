@@ -222,6 +222,8 @@ def validate_resolved_run(
             "resolved algorithm does not match training.strategy: "
             f"{algorithm.name!r} != {cfg.training.strategy!r}"
         )
+    if cfg.training.deduplicate_teacher_positions and algorithm.name != "dspark":
+        raise ValueError("deduplicate_teacher_positions requires DSpark training")
     mode = _feature_mode(cfg)
     _validate_feature_provider(cfg, algorithm, mode)
     _validate_draft_options(cfg, algorithm)

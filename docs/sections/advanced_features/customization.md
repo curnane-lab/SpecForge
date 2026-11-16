@@ -258,6 +258,11 @@ logits until backward: smaller chunks do not bound total saved-logits memory.
 DFlash always skips its zero-weight anchor projection in multi-slot objectives;
 DSpark supervises every slot. Detailed diagnostics retain the full blocks.
 
+DSpark can project repeated teacher positions once per objective chunk with
+`training.deduplicate_teacher_positions: true` (default `false`). Its indexed L1
+loss reads the compact teacher table directly; repeated draft slots still have
+independent losses and gradients. See [configuration and NPU validation](dspark_teacher_dedup.md).
+
 The selector consumes top-k candidates and hidden states, computes its own CE,
 and joins the logits backward only through candidate values. Its direct hidden
 state gradient is separate; `training.dflash2_selector_stop_gradient` detaches

@@ -204,9 +204,14 @@ def build_step(wrapped_model, *, target_head=None, **options):
 
 
 def _objective_settings(cfg):
+    options = dict(cfg.training.objective_options)
+    if cfg.training.deduplicate_teacher_positions:
+        if options.get("deduplicate_teacher_positions", True) is not True:
+            raise ValueError("conflicting deduplicate_teacher_positions settings")
+        options["deduplicate_teacher_positions"] = True
     return dict(
         name=cfg.training.objective,
-        options=cfg.training.objective_options,
+        options=options,
         loss=cfg.training.loss,
         weighting=cfg.training.weighting,
     )
@@ -278,6 +283,11 @@ def resolve_run(cfg, *, target_config=None):
             "canonical checkpoint cannot mix with legacy model.draft_* sources"
         )
     draft = resolve_config(cfg, target_config=target_config)
+    if (
+        cfg.training.deduplicate_teacher_positions
+        and draft.architecture != "DSparkDraftModel"
+    ):
+        raise ValueError("deduplicate_teacher_positions requires DSpark training")
     if cfg.initialization and cfg.initialization.from_target:
         from specforge.checkpoint.native import validate_target_initialization
         from specforge.checkpoint.resolve import read_target_config
@@ -669,10 +679,16 @@ def build_bundle(cfg, algorithm):
         )
     )
     runtime.fsdp_param_dtype = dtype
+    objective_options = asdict(runtime.objective)
+    if runtime.objective_name == "dspark":
+        # Execution-only switches add no weights/optimizer state and can be
+        # toggled when resuming, like the legacy chunk/fused-loss switches.
+        objective_options.pop("deduplicate_teacher_positions")
+        objective_options.pop("objective_chunk_size")
     contract = {
         "canonical_draft_config": encode_config(draft),
         "canonical_objective": runtime.objective_name,
-        "canonical_objective_options": asdict(runtime.objective),
+        "canonical_objective_options": objective_options,
         "canonical_use_liger_kernel": use_liger,
         "canonical_frozen": tuple(sorted(set(cfg.training.frozen))),
         "canonical_loss": asdict(runtime.token_loss),

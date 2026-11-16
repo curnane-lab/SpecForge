@@ -125,6 +125,8 @@ def resolve_objective(
     selected_loss = (
         objective.default_loss if token_loss.kind == "default" else token_loss
     )
+    if hasattr(objective, "validate_loss"):
+        objective.validate_loss(selected_loss)
     missing = (
         entry.requires | selected_loss.requires | position_weighting.requires
     ) - entry.provides
