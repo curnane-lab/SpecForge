@@ -285,9 +285,9 @@ class ModelProvider:
 class OfflineCaptureLayout:
     """Map generic captured tensors onto the persisted offline schema.
 
-    Local capture always exposes the same four per-sample sources:
-    ``input_ids``, ``loss_mask``, ``aux_hidden_states``, and
-    ``last_hidden_states``. Algorithms own the names they persist so the data
+    Local capture exposes generic per-sample sources: ``input_ids``,
+    ``loss_mask``, ``aux_hidden_states``, ``last_hidden_states``, and optional
+    ``mtp_hidden_states``. Algorithms own the names they persist so the data
     preparation command cannot silently drift away from their storage
     contracts.
     """
@@ -296,10 +296,15 @@ class OfflineCaptureLayout:
     aux_feature: str | None
     last_hidden_feature: str | None
     passthrough: Tuple[Tuple[str, str], ...]
+    mtp_hidden_feature: str | None = None
 
     def __post_init__(self) -> None:
         _non_empty(self.capture_method, field_name="capture_method")
-        for field_name in ("aux_feature", "last_hidden_feature"):
+        for field_name in (
+            "aux_feature",
+            "last_hidden_feature",
+            "mtp_hidden_feature",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 _non_empty(value, field_name=field_name)
@@ -330,6 +335,8 @@ class OfflineCaptureLayout:
             names.append(self.aux_feature)
         if self.last_hidden_feature is not None:
             names.append(self.last_hidden_feature)
+        if self.mtp_hidden_feature is not None:
+            names.append(self.mtp_hidden_feature)
         return tuple(names)
 
     def materialize(self, sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -340,6 +347,8 @@ class OfflineCaptureLayout:
             mappings.append((self.aux_feature, "aux_hidden_states"))
         if self.last_hidden_feature is not None:
             mappings.append((self.last_hidden_feature, "last_hidden_states"))
+        if self.mtp_hidden_feature is not None:
+            mappings.append((self.mtp_hidden_feature, "mtp_hidden_states"))
 
         record = {}
         for feature_name, source_key in mappings:
@@ -394,12 +403,14 @@ class ServerCaptureLayout:
     last_hidden_feature: str | None
     passthrough: Tuple[Tuple[str, str, Tuple[int, ...]], ...]
     attention_mask_feature: str | None = None
+    mtp_hidden_feature: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
             "aux_feature",
             "last_hidden_feature",
             "attention_mask_feature",
+            "mtp_hidden_feature",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -429,6 +440,7 @@ class ServerCaptureLayout:
                         self.aux_feature,
                         self.last_hidden_feature,
                         self.attention_mask_feature,
+                        self.mtp_hidden_feature,
                     )
                     if feature is not None
                 ),
@@ -692,6 +704,7 @@ def resolve_server_capture_layout(
             "aux_feature",
             "last_hidden_feature",
             "attention_mask_feature",
+            "mtp_hidden_feature",
         ):
             selected = getattr(layout, field_name)
             if selected is not None and selected != getattr(

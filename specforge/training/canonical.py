@@ -187,7 +187,11 @@ def resolve_run(cfg, *, target_config=None):
         normalizer=normalizer,
         required_tensors=frozenset(keys),
     )
-    target_repr = "hidden_state" if "target_last_hidden_states" in keys else None
+    target_repr = (
+        "hidden_state"
+        if {"target_last_hidden_states", "mtp_hidden_states"} & set(keys)
+        else None
+    )
     representations = frozenset({target_repr}) if target_repr else frozenset()
     contracts = [
         FeatureContract(
@@ -200,16 +204,21 @@ def resolve_run(cfg, *, target_config=None):
             storage=storage,
         )
     ]
-    # Generic capture supplies aux/final target states. DMTP needs an external
-    # frozen-MTP feature producer, so only precomputed records are accepted.
     layout = (
         None
         if requirements.capture_method is None
         else OfflineCaptureLayout(
             capture_method=requirements.capture_method,
             aux_feature="hidden_states" if "hidden_states" in keys else None,
-            last_hidden_feature="target_last_hidden_states" if target_repr else None,
+            last_hidden_feature=(
+                "target_last_hidden_states"
+                if "target_last_hidden_states" in keys
+                else None
+            ),
             passthrough=(("input_ids", "input_ids"), ("loss_mask", "loss_mask")),
+            mtp_hidden_feature=(
+                "mtp_hidden_states" if "mtp_hidden_states" in keys else None
+            ),
         )
     )
     offline = OfflineDataProvider(
@@ -234,6 +243,7 @@ def resolve_run(cfg, *, target_config=None):
                 ("input_ids", "input_ids", ()),
                 ("loss_mask", "loss_mask", ()),
             ),
+            mtp_hidden_feature=layout.mtp_hidden_feature,
         )
         streaming = (
             ServerStreamingProvider(

@@ -19,9 +19,9 @@ Tensors never pass through this process — the ``/generate`` response's
 :meth:`SGLangServerCaptureAdapter.produce_refs` builds committed-ready
 ``SampleRef``s.
 
-The server knows only generic artifacts (``aux`` = capture layers
-concatenated, ``last_hidden`` = post-norm final hidden) plus passthrough
-tensors.  The application composition root injects an algorithm-owned
+The server knows generic artifacts (``aux`` = capture layers concatenated,
+``last_hidden`` = post-norm final hidden, and optional ``mtp_hidden``) plus
+passthrough tensors. The application composition root injects an algorithm-owned
 :class:`ServerCaptureSchema`; this transport never resolves an algorithm name.
 """
 
@@ -93,6 +93,7 @@ class ServerCaptureSchema:
     last_hidden_feature: Optional[str]
     passthrough: Tuple[Tuple[str, str, Tuple[int, ...]], ...]
     attention_mask_feature: Optional[str] = None
+    mtp_hidden_feature: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +305,8 @@ class SGLangServerCaptureAdapter:
             features["aux"] = self.schema.aux_feature
         if self.schema.last_hidden_feature is not None:
             features["last_hidden"] = self.schema.last_hidden_feature
+        if self.schema.mtp_hidden_feature is not None:
+            features["mtp_hidden"] = self.schema.mtp_hidden_feature
         passthrough: List[Dict[str, Any]] = []
         for feature_name, payload_key, trailing in self.schema.passthrough:
             if payload_key == "input_ids":
@@ -360,6 +363,14 @@ class SGLangServerCaptureAdapter:
         sample_id = str(result["sample_id"])
         gen = int(result["gen"])
         feats: Dict[str, Dict[str, Any]] = result["features"]
+        if self.schema.mtp_hidden_feature is not None:
+            from specforge.inference.mtp_capture import MTP_ALIGNMENT
+
+            if result.get("mtp_hidden_alignment") != MTP_ALIGNMENT:
+                raise CaptureMismatchError(
+                    f"[{sample_id}] capture requires mtp_hidden_alignment="
+                    f"{MTP_ALIGNMENT!r}; got {result.get('mtp_hidden_alignment')!r}"
+                )
         specs: Dict[str, FeatureSpec] = {}
         nbytes = 0
         for name, meta in feats.items():
@@ -399,6 +410,11 @@ class SGLangServerCaptureAdapter:
                 "transport": "sglang_server_capture",
                 "server": self.base_url,  # which server captured it (provenance)
                 "generation": gen,  # the zero-copy get() locator
+                **(
+                    {"mtp_hidden_alignment": result["mtp_hidden_alignment"]}
+                    if self.schema.mtp_hidden_feature is not None
+                    else {}
+                ),
                 "valid_anchor_count": sum(
                     left > 0.5 and right > 0.5
                     for left, right in zip(

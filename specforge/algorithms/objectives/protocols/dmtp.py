@@ -1,6 +1,7 @@
 """DMTP supervises the suffix after the externally supplied first candidate."""
 
 from dataclasses import dataclass
+from functools import partial
 
 from specforge.data.loss_mask import has_consecutive_supervised_tokens
 
@@ -12,13 +13,18 @@ from ..registry import TrainingRequirements, register_protocol
 from .dflash import COMMON_MODULES
 
 
+def dmtp_loss_mask_filter(loss_mask):
+    return loss_mask.numel() >= 4 and has_consecutive_supervised_tokens(loss_mask[2:])
+
+
 @register_protocol(
     "dmtp",
     runtime_name="dflash",
     training=TrainingRequirements(
-        host_inputs=prepare_anchor_capacity,
+        capture_method="dflash",
+        host_inputs=partial(prepare_anchor_capacity, anchor_start=2),
         minimum_loss_tokens=2,
-        loss_mask_filter=has_consecutive_supervised_tokens,
+        loss_mask_filter=dmtp_loss_mask_filter,
     ),
     architectures=("DMTPDraftModel",),
     inputs=("input_ids", "hidden_states", "mtp_hidden_states", "loss_mask"),
@@ -58,6 +64,7 @@ class DMTPObjective:
             input_offset=1,
             label_offset=1,
             context_offset=spec.context_end_offset,
+            anchor_start=2,
         )
         mtp = gather(
             batch["mtp_hidden_states"],

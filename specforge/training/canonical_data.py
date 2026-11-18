@@ -6,6 +6,10 @@ from functools import partial
 def normalize_sample(raw, *, keys, max_len, loss_mask_filter=None):
     import torch
 
+    if "mtp_hidden_states" in keys:
+        version = raw.get("mtp_hidden_version")
+        if not torch.is_tensor(version) or version.numel() != 1 or version.item() != 1:
+            raise ValueError("DMTP offline records require mtp_hidden_version=1")
     result = {}
     length = None
     for key in keys:
@@ -140,7 +144,10 @@ def build_reader(hidden_states_path, *, strategy, keys, **kwargs):
             "hidden_states": ("aux_hidden_state",),
             "target_last_hidden_states": ("hidden_state",),
         },
-        optional_features=("lengths",),
+        optional_features=(
+            "lengths",
+            *(("mtp_hidden_version",) if "mtp_hidden_states" in keys else ()),
+        ),
         target_repr="hidden_state" if "target_last_hidden_states" in keys else None,
         **kwargs,
     )

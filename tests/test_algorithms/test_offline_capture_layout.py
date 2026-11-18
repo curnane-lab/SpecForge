@@ -5,7 +5,10 @@ import unittest
 import torch
 
 from specforge.algorithms.common.providers import OfflineCaptureLayout
-from tests.test_algorithms.fixtures import builtin_algorithm_registry
+from tests.test_algorithms.fixtures import (
+    algorithm_registration,
+    builtin_algorithm_registry,
+)
 
 
 class OfflineCaptureLayoutTest(unittest.TestCase):
@@ -118,6 +121,28 @@ class OfflineCaptureLayoutTest(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "loss-mask requirement"):
                     normalizer(raw)
+
+    def test_dmtp_capture_layout_and_versioned_normalization(self):
+        registration = algorithm_registration("dmtp")
+        provider = registration.providers.offline_for("text")
+        layout = provider.capture_layout
+        self.assertEqual(layout.mtp_hidden_feature, "mtp_hidden_states")
+        sources = {
+            "input_ids": torch.arange(4),
+            "loss_mask": torch.ones(4),
+            "aux_hidden_states": torch.randn(1, 4, 8),
+            "mtp_hidden_states": torch.randn(1, 4, 8),
+        }
+        record = layout.materialize(sources)
+        self.assertIs(record["mtp_hidden_states"], sources["mtp_hidden_states"])
+        record["mtp_hidden_version"] = torch.tensor(1)
+        normalized = provider.build_normalizer(4)(record)
+        self.assertEqual(normalized["mtp_hidden_states"].shape, (1, 4, 8))
+        with self.assertRaisesRegex(ValueError, "mtp_hidden_version=1"):
+            provider.build_normalizer(4)(layout.materialize(sources))
+        record["mtp_hidden_version"] = torch.tensor(2)
+        with self.assertRaisesRegex(ValueError, "mtp_hidden_version=1"):
+            provider.build_normalizer(4)(record)
 
     def test_duplicate_output_names_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "duplicate.*hidden_states"):

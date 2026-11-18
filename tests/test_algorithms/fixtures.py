@@ -12,6 +12,25 @@ from tests.test_config.test_draft_mtp_spec import mtp_config
 PRESETS = Path(__file__).resolve().parents[2] / "specforge/config/draft/presets"
 
 
+def dmtp_registration():
+    from tests.test_config.test_draft_dmtp_spec import dmtp_config
+
+    cfg = Config.model_validate(
+        dict(
+            draft=encode_config(dmtp_config()),
+            model=dict(target_model_path="target"),
+            data=dict(hidden_states_path="features"),
+        )
+    )
+    return resolve_run(cfg)[1]
+
+
+def algorithm_registration(name, **kwargs):
+    if name == "dmtp":
+        return dmtp_registration()
+    return builtin_algorithm_registry(**kwargs).resolve(name)
+
+
 def builtin_algorithm_registry(*, teacher_metrics=False, ttt_length=7):
     registrations = []
     for name in ("eagle3", "peagle", "dflash", "domino", "dspark", "dspine", "mtp"):

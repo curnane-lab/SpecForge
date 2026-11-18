@@ -77,15 +77,27 @@ The unknown continuation positions receive draft prediction supervision.
 The MTP predictor state is detached, so the draft loss does not fine-tune
 the target's MTP module.
 
-For DMTP training, use the SpecForge implementation
-[branch](https://github.com/sgl-project/SpecForge/tree/feat/dmtp-plugin).
-Follow its [training guide](https://github.com/sgl-project/SpecForge/blob/feat/dmtp-plugin/docs/sections/advanced_features/dmtp.md)
-for capture-plugin setup, MTP feature preparation, and online or offline
-training. A [Qwen3.6-27B example configuration](https://github.com/sgl-project/SpecForge/blob/feat/dmtp-plugin/examples/configs/online/disaggregated/external/qwen3.6-27b-dmtp.yaml)
-is provided on that branch; update the model and dataset paths and server URL
-for your environment. The guide documents supported target architectures,
-dependencies, and feature-alignment requirements. Its example layout and
-fusion interface should be read alongside the checkpoint you intend to train.
+The canonical `DMTPDraftModel` and `dmtp` objective support offline training
+and disaggregated streaming. Use `specforge/config/draft/presets/qwen3.6-27b-dmtp.yaml`
+as the structural configuration and `examples/configs/offline/colocated/qwen3.6-27b-dmtp.yaml`
+as the offline recipe. The recipe uses SDPA, eager PyTorch norm/MLP modules,
+and the reference cross-entropy implementation, so the same configuration is
+usable on Ascend NPU.
+
+Set `SPECFORGE_MTP_MODEL_PATH` on the capture server to the target checkpoint
+to produce `mtp_hidden_states`. The optional feature uses the
+`anchor_post_norm_v1` contract: row `a` consumes token `a` and final target
+hidden `a-1`, and its post-normalization MTP output predicts token `a+1`.
+Offline `.ckpt` records must contain `mtp_hidden_version=1`. The capture plugin
+currently supports unquantized, single-layer, dense Qwen3.5/Qwen3.6 MTP with
+default RoPE and text-only, unpacked requests. The target and native MTP are
+frozen; draft backbone and MTP-fusion parameters receive gradients.
+
+Prepare features with the ordinary `scripts/prepare_hidden_states.py --config
+<offline-config>` command, then start `specforge train --config
+<offline-config>`. No separate DMTP-specific capture client is needed. The
+inference loop is not part of this training support and requires a DMTP-aware
+runtime with the matching fusion adapter.
 
 ## Inference
 

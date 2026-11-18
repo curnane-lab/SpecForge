@@ -1,0 +1,36 @@
+model:
+  target_model_path: Qwen/Qwen3.6-27B
+  torch_dtype: bfloat16
+  trust_remote_code: true
+  embedding_key: model.language_model.embed_tokens.weight
+  use_liger_kernel: false
+draft: specforge/config/draft/presets/qwen3.6-27b-dmtp.yaml
+initialization: {}
+data:
+  hidden_states_path: ./cache/hidden_states/qwen3.6-27b-dmtp
+  max_length: 2048
+training:
+  attention_backend: sdpa
+  loss:
+    fused: false
+  objective: dmtp
+  objective_options:
+    num_anchors: 512
+  max_steps: 10000
+  num_epochs: 1
+  batch_size: 1
+  accumulation_steps: 4
+  learning_rate: 0.0006
+  warmup_ratio: 0.04
+  max_grad_norm: 1
+  save_interval: 1000
+  log_interval: 10
+tracking:
+  report_to: tensorboard
+run_id: qwen3.6-27b-dmtp
+output_dir: ./outputs/qwen3.6-27b-dmtp
+deployment:
+  mode: local_colocated
+  trainer:
+    nnodes: 1
+    nproc_per_node: 1

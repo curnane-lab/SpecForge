@@ -95,6 +95,23 @@ python -m sglang.launch_server --model-path <target> --skip-tokenizer-init \
 
 The scheduler refuses to start if capture is enabled without these flags.
 
+For canonical DMTP, additionally set `SPECFORGE_MTP_MODEL_PATH` to the same
+checkpoint passed to `--model-path`. The writer then loads only the frozen
+native MTP and its shared embedding, and publishes `mtp_hidden_states` using
+the `anchor_post_norm_v1` contract:
+
+```text
+mtp_hidden_states[a] = MTP(input_ids[a], target_last_hidden[a-1])
+T1                   = input_ids[a+1]
+```
+
+Row zero is padding. The output is after MTP final normalization and before
+its LM head. This supports unquantized, single-layer, dense Qwen3.5/Qwen3.6
+MTP on CUDA and Ascend NPU through PyTorch SDPA. Text-only, unpacked requests
+are required. Reserve memory for the extra embedding and MTP on the capture
+device. Install SpecForge with `--no-deps` when enabling this optional import;
+ordinary capture still does not import the main package.
+
 SpecForge selects the plugin with `deployment.disaggregated.server_capture`.
 The default, `auto`, finds it without configuration:
 

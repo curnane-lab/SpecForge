@@ -163,6 +163,29 @@ class ObjectiveTest(unittest.TestCase):
         self.assertEqual(result.loss.item(), 0)
         result.loss.backward()
 
+    def test_dmtp_requires_history_before_sampling_anchors(self):
+        from specforge.algorithms.objectives.inputs import prepare_anchor_capacity
+        from specforge.algorithms.objectives.protocols.dmtp import dmtp_loss_mask_filter
+
+        config = dmtp_config()
+        batch = training_batch(config)
+        batch["loss_mask"].fill_(1)
+        blocks = prepare_blocks(
+            config,
+            batch,
+            num_anchors=2,
+            input_offset=1,
+            label_offset=1,
+            context_offset=-1,
+            anchor_start=2,
+        )
+        self.assertTrue((blocks.anchors >= 2).all())
+        capacity = prepare_anchor_capacity(batch, config, anchor_start=2)
+        self.assertEqual(capacity["anchor_capacity"].numel(), 5)
+        self.assertTrue(dmtp_loss_mask_filter(torch.tensor([0, 0, 1, 1])))
+        self.assertFalse(dmtp_loss_mask_filter(torch.ones(3)))
+        self.assertFalse(dmtp_loss_mask_filter(torch.tensor([1, 1, 0, 0])))
+
     def test_mtp_matches_shifted_cross_entropy(self):
         config = mtp_config(target_bindings=(), target_logit_transform=None)
         model = build_draft_model(config)

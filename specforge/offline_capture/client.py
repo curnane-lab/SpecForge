@@ -66,6 +66,11 @@ class OfflineCaptureClient:
                     or state.get("spec_capture_method") != layout.capture_method
                     or tuple(state.get("spec_capture_aux_layer_ids") or ())
                     != self.layers
+                    or (
+                        layout.mtp_hidden_feature is not None
+                        and state.get("spec_capture_mtp_alignment")
+                        != "anchor_post_norm_v1"
+                    )
                 ):
                     raise ValueError(
                         f"{url}: capture contract differs from "
@@ -74,10 +79,11 @@ class OfflineCaptureClient:
                     )
         aux = "aux_hidden_states" if layout.aux_feature is not None else None
         last = "last_hidden_states" if layout.last_hidden_feature is not None else None
+        mtp = "mtp_hidden_states" if layout.mtp_hidden_feature is not None else None
         self.contract = CaptureConfig.from_strategy(
-            required_features={name for name in (aux, last) if name is not None},
+            required_features={name for name in (aux, last, mtp) if name is not None},
             aux_hidden_state_layer_ids=self.layers,
-            target_repr="hidden_state" if last else None,
+            target_repr="hidden_state" if last or mtp else None,
             target_hidden_size=target_hidden_size,
         )
         self.store = store if store is not None else self._connect_store()
@@ -87,7 +93,7 @@ class OfflineCaptureClient:
                 self.store,
                 run_id=self.run_id,
                 algorithm=layout.capture_method,
-                schema=ServerCaptureSchema(aux, last, ()),
+                schema=ServerCaptureSchema(aux, last, (), mtp_hidden_feature=mtp),
                 timeout_s=timeout_s,
                 target_model_version=target_model_path,
                 server_capture="plugin",

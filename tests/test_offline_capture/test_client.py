@@ -15,7 +15,7 @@ import torch
 from scripts.prepare_hidden_states import HiddenStatesGenerator, sample_range
 from specforge.offline_capture import OfflineCaptureClient
 from specforge.runtime.data_plane.mooncake_store import MooncakeFeatureStore
-from tests.test_algorithms.fixtures import builtin_algorithm_registry
+from tests.test_algorithms.fixtures import algorithm_registration
 from tests.test_runtime.test_server_capture import _FakeMooncakeStore, _request_specs
 
 sys.path.insert(
@@ -52,8 +52,7 @@ class OfflineCaptureTest(unittest.TestCase):
 
     def client(self, strategy="eagle3", **overrides):
         self.layout = (
-            builtin_algorithm_registry()
-            .resolve(strategy)
+            algorithm_registration(strategy)
             .providers.offline_for("text")
             .capture_layout
         )
@@ -64,6 +63,11 @@ class OfflineCaptureTest(unittest.TestCase):
                     "spec_capture_backend": "plugin",
                     "spec_capture_method": self.layout.capture_method,
                     "spec_capture_aux_layer_ids": [1, 3],
+                    **(
+                        {"spec_capture_mtp_alignment": "anchor_post_norm_v1"}
+                        if self.layout.mtp_hidden_feature is not None
+                        else {}
+                    ),
                 }
             ],
         }
@@ -93,6 +97,11 @@ class OfflineCaptureTest(unittest.TestCase):
                         len(ids), 8
                     ),
                     torch.ones(len(ids), 4),
+                    *(
+                        [torch.full((len(ids), 4), 2.0)]
+                        if "mtp_hidden" in spec["features"]
+                        else []
+                    ),
                 )
             )
         results = self.sink.put_samples(samples)
@@ -140,6 +149,37 @@ class OfflineCaptureTest(unittest.TestCase):
                             record[self.layout.aux_feature].shape, (1, length, 8)
                         )
                     self.assertFalse(self.backend._d)
+
+    def test_dmtp_round_trip_persists_versioned_mtp_features(self):
+        client = self.client("dmtp")
+        provider = algorithm_registration("dmtp").providers.offline_for("text")
+        rows = [
+            {
+                "input_ids": [1, 2, 3, 4],
+                "attention_mask": [1, 1, 1, 1],
+                "loss_mask": [0, 1, 1, 1],
+            },
+            {
+                "input_ids": [5, 6, 7, 8],
+                "attention_mask": [1, 1, 1, 1],
+                "loss_mask": [1, 1, 1, 1],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with HiddenStatesGenerator(client, self.layout) as generator:
+                generator.generate([rows], directory)
+            for path in Path(directory).rglob("*.ckpt"):
+                record = torch.load(path, weights_only=True)
+                self.assertEqual(record["mtp_hidden_version"].item(), 1)
+                self.assertEqual(
+                    record["mtp_hidden_states"].shape,
+                    (1, record["input_ids"].numel(), 4),
+                )
+                ready = provider.build_normalizer(4)(record)
+                self.assertNotIn("mtp_hidden_version", ready)
+                torch.testing.assert_close(
+                    ready["mtp_hidden_states"], record["mtp_hidden_states"]
+                )
 
     def test_features_live_until_writer_finishes(self):
         client = self.client()

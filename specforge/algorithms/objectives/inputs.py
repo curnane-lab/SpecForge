@@ -75,12 +75,14 @@ class Blocks:
     layer_inputs: tuple[LayerInputs, ...]
 
 
-def prepare_anchor_capacity(batch, config):
+def prepare_anchor_capacity(batch, config, *, anchor_start=0):
     """Encode the host-side valid-anchor count in a tensor shape before H2D."""
     if batch["loss_mask"].device.type != "cpu":
         return {}
     valid = valid_tokens(batch)
-    count = int((valid[:, :-1] & valid[:, 1:]).sum(-1).max())
+    valid = valid[:, :-1] & valid[:, 1:]
+    valid[:, :anchor_start] = False
+    count = int(valid.sum(-1).max())
     return {"anchor_capacity": torch.empty(count, dtype=torch.bool)}
 
 
@@ -105,6 +107,7 @@ def prepare_blocks(
     input_offset=0,
     context_offset=0,
     prefix=False,
+    anchor_start=0,
 ):
     """Sample adjacent supervised anchors and isolate each independent draft block.
 
@@ -118,6 +121,7 @@ def prepare_blocks(
     if "lengths" in batch and batch["lengths"].numel() > ids.shape[0]:
         raise ValueError("block objectives require unpacked sequences")
     valid = supervised[:, :-1] & supervised[:, 1:]
+    valid[:, :anchor_start] = False
     capacity = batch.get("anchor_capacity")
     anchors, keep = sample_anchors(
         valid, num_anchors, None if capacity is None else capacity.numel()

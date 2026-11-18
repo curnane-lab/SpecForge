@@ -515,6 +515,10 @@ class HiddenStatesGenerator:
                 try:
                     for idx, source, tensors in zip(sample_ids, inputs, captured):
                         record = self.capture_layout.materialize({**source, **tensors})
+                        if self.capture_layout.mtp_hidden_feature is not None:
+                            record["mtp_hidden_version"] = torch.tensor(
+                                1, dtype=torch.int64
+                            )
                         self._save_tensor_async(
                             record, self._get_file_path(output_path, idx)
                         )
