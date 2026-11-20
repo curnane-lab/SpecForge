@@ -873,6 +873,14 @@ def _build_online(
                     cleanup_errors.append(
                         f"published-ref scan: {type(exc).__name__}: {exc}"
                     )
+            abort_shared = getattr(store, "abort_shared_owners", None)
+            if callable(abort_shared):
+                try:
+                    abort_shared(reason="online-attempt-finished")
+                except Exception as exc:
+                    cleanup_errors.append(
+                        f"shared-aux-owner cleanup: {type(exc).__name__}: {exc}"
+                    )
             try:
                 store.discard_external_attempts(
                     reason="online-attempt-unadopted-capture"

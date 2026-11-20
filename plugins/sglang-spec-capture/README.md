@@ -151,6 +151,13 @@ layers. For example, on a server launched with
 written together or not at all. The plugin advertises this as
 `spec_capture_outputs` in `/server_info`.
 
+When several outputs request the same aux feature with identical `layer_ids`,
+the sink writes that aux tensor once under a request-scoped owner and returns
+`shared_aux_sample_id` on each output. The other features keep their per-output
+keys. The producer tracks the owner's consumers and deletes it only after all
+of them finish, while the outputs continue to carry independent metadata and
+lifecycle for their remaining features.
+
 ## Multi-node NVLink
 
 On GB200/GB300 NVL72 systems, `MOONCAKE_PROTOCOL=nvlink` moves captures from

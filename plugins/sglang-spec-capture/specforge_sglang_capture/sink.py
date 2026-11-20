@@ -590,13 +590,26 @@ class SpecCaptureSink:
             store_id = str(spec["store_id"])
             gen = int(spec.get("gen", 1))
             replace = bool(spec.get("replace", False))
+            outputs = spec_outputs(spec)
+            group_sizes: Dict[Tuple[str, Tuple[int, ...]], int] = {}
+            for output in outputs:
+                features = output.get("features") or {}
+                if ARTIFACT_AUX not in features:
+                    continue
+                group = (
+                    features[ARTIFACT_AUX],
+                    tuple(output.get("layer_ids") or ()),
+                )
+                group_sizes[group] = group_sizes.get(group, 0) + 1
+            shared_aux: Dict[Tuple[str, Tuple[int, ...]], Dict[str, Any]] = {}
             written: List[Dict[str, Any]] = []
-            for output in spec_outputs(spec):
+            for output in outputs:
                 sample_id = str(output["sample_id"])
                 features: Dict[str, str] = dict(output.get("features") or {})
                 layer_ids = output.get("layer_ids")
                 result_feats: Dict[str, Dict[str, Any]] = {}
                 common = dict(store_id=store_id, sample_id=sample_id, gen=gen)
+                shared_sample_id = None
 
                 for artifact, tensor in (
                     (ARTIFACT_AUX, aux),
@@ -611,15 +624,39 @@ class SpecCaptureSink:
                             "did not capture it; launch with "
                             "--enable-return-aux-hidden-states"
                         )
+                    group = (name, tuple(layer_ids or ()))
                     if artifact == ARTIFACT_AUX and layer_ids is not None:
                         tensor = self._cut_layers(tensor, layer_ids)
-                    stage(
-                        result_feats,
-                        replace=replace,
-                        name=name,
-                        tensor=tensor.unsqueeze(0),
-                        **common,
-                    )
+                    if artifact == ARTIFACT_AUX and group_sizes[group] > 1:
+                        shared = shared_aux.get(group)
+                        if shared is None:
+                            shared_sample_id = (
+                                f"{spec['sample_id']}-aux-{len(shared_aux)}"
+                            )
+                            stage(
+                                result_feats,
+                                replace=replace,
+                                name=name,
+                                tensor=tensor.unsqueeze(0),
+                                store_id=store_id,
+                                sample_id=shared_sample_id,
+                                gen=gen,
+                            )
+                            shared_aux[group] = {
+                                "sample_id": shared_sample_id,
+                                "meta": result_feats[name],
+                            }
+                        else:
+                            result_feats[name] = shared["meta"]
+                        shared_sample_id = shared_aux[group]["sample_id"]
+                    else:
+                        stage(
+                            result_feats,
+                            replace=replace,
+                            name=name,
+                            tensor=tensor.unsqueeze(0),
+                            **common,
+                        )
                 for item in output.get("passthrough") or []:
                     dtype = STR_DTYPE.get(str(item.get("dtype", "int64")))
                     if dtype is None:
@@ -648,6 +685,11 @@ class SpecCaptureSink:
                             else [int(layer) for layer in layer_ids]
                         ),
                         "features": result_feats,
+                        **(
+                            {"shared_aux_sample_id": shared_sample_id}
+                            if shared_sample_id is not None
+                            else {}
+                        ),
                     }
                 )
             if "outputs" in spec:

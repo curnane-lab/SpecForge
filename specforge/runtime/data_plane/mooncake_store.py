@@ -665,6 +665,9 @@ class MooncakeFeatureStore(FeatureStore):
         # (consumer) so each side can free the sample it owns/consumed without the
         # ref in hand at release() time.
         self._sample_names: Dict[str, List[str]] = {}
+        self._sample_key_prefixes: Dict[str, Dict[str, str]] = {}
+        self._shared_aux_features: Dict[str, set] = {}
+        self._shared_owner_ids: set = set()
         # Server capture registers deterministic keys before issuing HTTP. If
         # the response is lost, no SampleRef exists to adopt/abort them. Keep a
         # shared (multi-adapter) provisional index so terminal producer cleanup
@@ -695,7 +698,8 @@ class MooncakeFeatureStore(FeatureStore):
         # generation lives in the key (like SharedDirFeatureStore's filename gen):
         # a re-put writes a new-gen key set and removes the old, so a stale ref's
         # keys are gone -> get() raises (B5), no payload-carried gen needed.
-        return f"{self.store_id}/{sample_id}/g{gen}/{name}"
+        prefix = self._sample_key_prefixes.get(sample_id, {}).get(name, sample_id)
+        return f"{self.store_id}/{prefix}/g{gen}/{name}"
 
     # -- store wrappers (status-code aware) --------------------------------
     def _store_exists(self, key: str) -> bool:
@@ -991,6 +995,24 @@ class MooncakeFeatureStore(FeatureStore):
             },
         )
 
+    def _register_shared_ref(self, sample_ref: SampleRef) -> None:
+        prefixes = {
+            name: str(value).rsplit("/", 1)[0]
+            for name, value in sample_ref.feature_keys.items()
+        }
+        shared = set(sample_ref.metadata.get("shared_aux_features") or ())
+        with self._lock:
+            self._sample_key_prefixes[sample_ref.sample_id] = prefixes
+            self._shared_aux_features[sample_ref.sample_id] = shared
+            if sample_ref.metadata.get("shared_aux_owner"):
+                self._shared_owner_ids.add(sample_ref.sample_id)
+
+    def abort_shared_owners(self, *, reason: str) -> None:
+        with self._lock:
+            owner_ids = list(self._shared_owner_ids)
+        for sample_id in owner_ids:
+            self.abort(sample_id, reason=reason)
+
     def adopt(self, sample_ref: SampleRef) -> None:
         """Register an externally-produced sample for lifecycle management.
 
@@ -1005,6 +1027,7 @@ class MooncakeFeatureStore(FeatureStore):
             raise ValueError(
                 f"cannot adopt {sample_ref.sample_id}: ref carries no generation"
             )
+        self._register_shared_ref(sample_ref)
         self._locate(sample_ref)
         with self._lock:
             gen = int(gen)
@@ -1123,6 +1146,7 @@ class MooncakeFeatureStore(FeatureStore):
                     f"refusing use-after-free"
                 )
         wanted = names or list(sample_ref.feature_keys.keys())
+        self._register_shared_ref(sample_ref)
         self._locate(sample_ref)
         out, gen = self._get_tensors(sample_ref, wanted, device)
         # Pooled reads already placed every feature (integer features on the
@@ -1231,7 +1255,10 @@ class MooncakeFeatureStore(FeatureStore):
         if gen is None:
             return True  # nothing tracked to remove (already freed)
         ok = True
+        shared = self._shared_aux_features.get(sample_id, set())
         for name in self._sample_names.get(sample_id, []):
+            if name in shared:
+                continue
             key = self._tkey(sample_id, gen, name)
             if self._store_remove(key, force=force):
                 continue
@@ -1247,6 +1274,9 @@ class MooncakeFeatureStore(FeatureStore):
         self._generation.pop(sample_id, None)
         self._put_time.pop(sample_id, None)
         self._sample_names.pop(sample_id, None)
+        self._sample_key_prefixes.pop(sample_id, None)
+        self._shared_aux_features.pop(sample_id, None)
+        self._shared_owner_ids.discard(sample_id)
         self._release_pending.pop(sample_id, None)
         if generation is not None:
             self._external_provisional.pop((sample_id, generation), None)

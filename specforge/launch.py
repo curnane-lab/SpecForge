@@ -496,31 +496,41 @@ class _DrafterLane:
         self.resident_bytes = 0
         self.accounted_consumed = 0
         self.published_sizes: deque = deque()
+        self.published_refs: deque = deque()
+        self.consumed_callback = None
         #: The trainer has stopped: no more refs are captured for it.
         self.stopped = False
+
+    def _mark_consumed(self, delta: int) -> None:
+        for _ in range(delta):
+            ref = self.published_refs.popleft()
+            if self.consumed_callback is not None:
+                self.consumed_callback(ref, self.label)
 
     def reconcile_consumed(self) -> int:
         """Bytes still resident after the trainer's latest acknowledgement."""
         consumed, released_bytes = self.channel.consumed_state_remote()
+        delta = consumed - self.accounted_consumed
+        if delta < 0 or delta > len(self.published_refs):
+            raise RuntimeError(
+                "producer ref accounting does not match the channel: "
+                f"consumed advanced by {delta} with "
+                f"{len(self.published_refs)} published refs tracked"
+            )
         if released_bytes is not None:
             resident = self.published_bytes - released_bytes
             if resident < 0:
                 raise RuntimeError("released bytes exceed published bytes")
+            self._mark_consumed(delta)
             self.resident_bytes = resident
             self.accounted_consumed = consumed
             self.published_sizes.clear()
             return resident
         # Integer-only channels acknowledge FIFO; source distributors publish
         # exact bytes, including after a consumer restart.
-        delta = consumed - self.accounted_consumed
-        if delta < 0 or delta > len(self.published_sizes):
-            raise RuntimeError(
-                "producer byte accounting does not match the channel: "
-                f"consumed advanced by {delta} with "
-                f"{len(self.published_sizes)} published refs tracked"
-            )
         for _ in range(delta):
             self.resident_bytes -= self.published_sizes.popleft()
+        self._mark_consumed(delta)
         self.accounted_consumed = consumed
         return self.resident_bytes
 
@@ -1194,7 +1204,27 @@ def build_disagg_online_producer(
             w.start()
         publish_lock = threading.Lock()
         state = {"first_ref_logged": False}
+        shared_required = {}
+        shared_consumed = {}
+
+        def track_shared(ref, label: str) -> None:
+            owner = ref.metadata.get("shared_aux_sample_id")
+            if owner is not None:
+                shared_required.setdefault(owner, set()).add(label)
+
+        def consume_shared(ref, label: str) -> None:
+            owner = ref.metadata.get("shared_aux_sample_id")
+            if owner is None or owner not in shared_required:
+                return
+            consumed = shared_consumed.setdefault(owner, set())
+            consumed.add(label)
+            if shared_required[owner] <= consumed:
+                feature_store.abort(owner, reason="shared-aux-all-drafters-consumed")
+                shared_required.pop(owner, None)
+                shared_consumed.pop(owner, None)
+
         for lane in lanes:
+            lane.consumed_callback = consume_shared
             lane.accounted_consumed = lane.channel.consumed_remote()
 
         def produced_count() -> int:
@@ -1333,6 +1363,9 @@ def build_disagg_online_producer(
                                 "failed to free unpublished refs: %s", cleanup_errors
                             )
                         raise
+                    for ref in batch:
+                        track_shared(ref, lane.label)
+                    lane.published_refs.extend(batch)
                     if lane.channel.consumed_state_remote()[1] is None:
                         lane.published_sizes.extend(batch_sizes)
                     lane.published_bytes += sum(batch_sizes)

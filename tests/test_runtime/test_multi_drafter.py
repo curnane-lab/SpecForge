@@ -203,6 +203,37 @@ class TestCaptureForSeveralDrafters(_MultiDrafterCase):
             torch.testing.assert_close(tensors["hidden_states"][0], aux[:, HIDDEN:])
             torch.testing.assert_close(tensors["target_last_hidden_states"][0], last)
 
+    def test_identical_layers_share_aux_until_owner_cleanup(self):
+        (dflash, dspark) = self._adapter().produce_refs(
+            [_task(0, 4)], capture=[_capture("dflash"), _capture("dflash")]
+        )[0]
+        self.assertEqual(
+            dflash.metadata["shared_aux_sample_id"],
+            dspark.metadata["shared_aux_sample_id"],
+        )
+        aux_keys = [key for key in self.backend._d if key.endswith("/hidden_states")]
+        self.assertEqual(len(aux_keys), 1)
+
+        first, _ = self.store.get(dflash)
+        second, _ = self.store.get(dspark)
+        torch.testing.assert_close(first["hidden_states"], second["hidden_states"])
+        self.store.abort(dflash.sample_id, reason="dflash-finished")
+        second, _ = self.store.get(dspark)
+        self.assertEqual(second["hidden_states"].shape, (1, 4, 2 * HIDDEN))
+        self.store.abort(dspark.sample_id, reason="dspark-finished")
+        self.assertEqual(len(aux_keys), 1)
+        self.store.abort_shared_owners(reason="run-finished")
+        self.assertFalse(any(key.endswith("/hidden_states") for key in self.backend._d))
+
+    def test_different_layers_keep_independent_aux_objects(self):
+        dflash, dspark = self._adapter().produce_refs(
+            [_task(0, 4)], capture=self.captures
+        )[0]
+        self.assertNotIn("shared_aux_sample_id", dflash.metadata)
+        self.assertNotIn("shared_aux_sample_id", dspark.metadata)
+        aux_keys = [key for key in self.backend._d if key.endswith("/hidden_states")]
+        self.assertEqual(len(aux_keys), 2)
+
     def test_one_drafter_sends_todays_request(self):
         self.server.sink.aux_layer_ids = list(LAYERS["dflash"])
         output = _output("dflash")
@@ -426,6 +457,46 @@ class TestProducerForSeveralDrafters(_MultiDrafterCase):
         self.assertEqual(len(_samples(self.backend, "dflash")), 3)
         (last_output,) = self.server.specs[-1]["outputs"]
         self.assertTrue(last_output["sample_id"].startswith("run-dspark:"))
+
+    def test_shared_aux_is_freed_only_after_every_lane_ack(self):
+        self.addCleanup(LAYERS.__setitem__, "dspark", LAYERS["dspark"])
+        LAYERS["dspark"] = LAYERS["dflash"]
+        channels = self._channels()
+        drive = self._producer(
+            channels,
+            _prompts(12),
+            in_flight_high_watermark=3,
+            in_flight_low_watermark=1,
+        )
+        thread, outcome = self._start(drive, channels)
+        dflash, dspark = (
+            StreamingRefChannel(channels[name].path) for name in ("dflash", "dspark")
+        )
+        self.assertTrue(
+            self._wait(lambda: channels["dflash"].published == 3, train=dspark)
+        )
+        refs = dflash.poll()
+        owner_ids = [ref.metadata["shared_aux_sample_id"] for ref in refs]
+        self.assertEqual(len(owner_ids), 3)
+
+        def owner_present(owner):
+            return any(key.startswith(f"run/{owner}/") for key in self.backend._d)
+
+        self.assertTrue(all(owner_present(owner) for owner in owner_ids))
+        dflash.mark_consumed(len(refs))
+        self.assertTrue(
+            self._wait(
+                lambda: all(not owner_present(owner) for owner in owner_ids),
+                train=dspark,
+            )
+        )
+        dflash.mark_consumer_done()
+        self.assertTrue(
+            self._wait(lambda: channels["dspark"].is_closed(), train=dspark)
+        )
+        dspark.mark_consumer_done()
+        thread.join(10)
+        self.assertEqual(outcome, {"produced": 12})
 
     def test_a_drafter_can_stop_in_the_middle_of_a_publish(self):
         channels = self._channels()

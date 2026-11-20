@@ -529,7 +529,43 @@ class SGLangServerCaptureAdapter:
                     name: int(meta["address"]) for name, meta in feats.items()
                 },
             }
+        shared_sample_id = result.get("shared_aux_sample_id")
+        aux_feature = output.schema.aux_feature
+        if shared_sample_id is not None and aux_feature in specs:
+            ref.feature_keys[aux_feature] = f"{shared_sample_id}/{aux_feature}"
+            ref.metadata["shared_aux_sample_id"] = str(shared_sample_id)
+            ref.metadata["shared_aux_features"] = [aux_feature]
         return ref
+
+    def _shared_aux_ref(
+        self, task: PromptTask, ref, *, owner_id: str, feature_name: str
+    ):
+        from specforge.runtime.contracts import SampleRef
+
+        spec = ref.feature_specs[feature_name]
+        generation = int(ref.metadata["generation"])
+        return SampleRef(
+            sample_id=owner_id,
+            run_id=self.run_id,
+            source_task_id=task.task_id,
+            feature_store_uri=f"mooncake://{self.store.store_id}/{owner_id}",
+            feature_keys={feature_name: f"{owner_id}/{feature_name}"},
+            feature_specs={feature_name: spec},
+            strategy="shared_aux",
+            schema_version=ref.schema_version,
+            target_model_version=ref.target_model_version,
+            tokenizer_version=ref.tokenizer_version,
+            num_tokens=ref.num_tokens,
+            estimated_bytes=_spec_nbytes(spec.shape, spec.dtype),
+            metadata={
+                "run_id": self.run_id,
+                "source_task_id": task.task_id,
+                "strategy": "shared_aux",
+                "generation": generation,
+                "shared_aux_owner": True,
+                "shared_aux_feature": feature_name,
+            },
+        )
 
     def _ref_fault(
         self,
@@ -608,6 +644,17 @@ class SGLangServerCaptureAdapter:
         wanted = [pair for pair in zip(self.outputs, captures) if pair[0].wanted()]
         if not wanted:
             raise RuntimeError("no drafter wants capture output any more")
+        shared_aux_feature = wanted[0][0].schema.aux_feature
+        first_layers = tuple(wanted[0][1].aux_hidden_state_layer_ids)
+        share_aux = bool(
+            shared_aux_feature
+            and len(wanted) > 1
+            and all(
+                output.schema.aux_feature == shared_aux_feature
+                and tuple(output_capture.aux_hidden_state_layer_ids) == first_layers
+                for output, output_capture in wanted[1:]
+            )
+        )
         body = self._request_inputs(tasks)
         # A fresh cache namespace forces a full prefill on every attempt while
         # leaving SGLang free to use the radix data structure required by hybrid
@@ -626,7 +673,7 @@ class SGLangServerCaptureAdapter:
             }
             for payload in capture_payloads
         ]
-        for payload in capture_payloads:
+        for task, payload in zip(tasks, capture_payloads):
             for sample in payload.get("outputs", (payload,)):
                 feature_names = list(sample["features"].values())
                 feature_names.extend(
@@ -636,6 +683,13 @@ class SGLangServerCaptureAdapter:
                     sample["sample_id"],
                     generation=int(payload["gen"]),
                     feature_names=feature_names,
+                    server_url=self.base_url,
+                )
+            if share_aux:
+                self.store.track_external_attempt(
+                    f"{self._sample_id(task)}-aux-0",
+                    generation=int(payload["gen"]),
+                    feature_names=[shared_aux_feature],
                     server_url=self.base_url,
                 )
         rows = self.post_fn(
@@ -650,6 +704,7 @@ class SGLangServerCaptureAdapter:
         capture_hint = _CAPTURE_HINTS[server_capture]
         out: List[Union[Any, ServerCaptureFailure]] = []
         successful_refs = []
+        successful_owners = []
         for task, row, payload in zip(tasks, rows, capture_payloads):
             if not isinstance(row, dict):
                 raise RuntimeError(
@@ -716,6 +771,27 @@ class SGLangServerCaptureAdapter:
                 refs.append(
                     self._ref_from_result(task, sample_result, output_capture, output)
                 )
+            owner = None
+            shared = False
+            if share_aux:
+                owner_id = f"{self._sample_id(task)}-aux-0"
+                owner = self._shared_aux_ref(
+                    task,
+                    refs[0],
+                    owner_id=owner_id,
+                    feature_name=shared_aux_feature,
+                )
+                shared_ids = {
+                    sample_result.get("shared_aux_sample_id")
+                    for sample_result in written
+                }
+                if shared_ids == {owner_id}:
+                    shared = True
+                elif shared_ids != {None}:
+                    raise RuntimeError(
+                        "spec-capture server returned inconsistent shared aux "
+                        f"ownership for task {task.task_id}: {shared_ids}"
+                    )
             fault = None
             for ref, sample_result, (output, output_capture) in zip(
                 refs, written, wanted
@@ -732,6 +808,9 @@ class SGLangServerCaptureAdapter:
                 for ref in refs:
                     self.store.adopt(ref)
                     self.store.abort(ref.sample_id, reason=abort_reason)
+                if owner is not None:
+                    self.store.adopt(owner)
+                    self.store.abort(owner.sample_id, reason=abort_reason)
                 out.append(
                     ServerCaptureFailure(
                         task_id=task.task_id, reason=reason, retryable=False
@@ -744,8 +823,13 @@ class SGLangServerCaptureAdapter:
             # lease batch; adopting this prefix now would make it invisible to
             # terminal provisional cleanup even though no refs are returned.
             successful_refs.extend(refs)
+            if shared:
+                successful_owners.append(owner)
+            elif owner is not None:
+                self.store.adopt(owner)
+                self.store.abort(owner.sample_id, reason="shared-aux-not-written")
             out.append(refs[0] if len(self.outputs) == 1 else tuple(refs))
-        for ref in successful_refs:
+        for ref in successful_refs + successful_owners:
             self.store.adopt(ref)
         return out
 
