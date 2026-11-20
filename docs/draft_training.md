@@ -133,6 +133,8 @@ in objective_options. Removed flat training options are rejected.
 ```yaml
 model:
   target_model_path: /models/target
+  # Required only when these features are captured from a live SGLang server.
+  target_weight_version: target-revision-a
   torch_dtype: bfloat16
 
 draft: /configs/dflash.yaml
@@ -620,7 +622,9 @@ python scripts/prepare_hidden_states.py -c /configs/run.yaml \
   --data-path /data/train.jsonl --output-path /data/canonical-features
 ```
 
-`--target-model-path` defaults to the run's `model.target_model_path`.
+`--target-model-path` defaults to the run's `model.target_model_path`, and
+`--target-weight-version` defaults to `model.target_weight_version`. Live capture
+requires a nonempty version that exactly matches every server's `/model_info`.
 `--draft /configs/eagle3.yaml` captures for the default objective and loss only.
 `-c` and `--draft` are mutually exclusive. The
 canonical YAML selects the architecture, capture layers and output schema.

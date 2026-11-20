@@ -271,6 +271,9 @@ class ModelConfig(StrictConfigModel):
         return value
 
     target_model_path: str
+    #: Expected live checkpoint identity reported by SGLang's ``/model_info``.
+    #: Server capture refuses to publish features when this is unset or different.
+    target_weight_version: Optional[str] = None
     #: Online capture always runs on an external SGLang server; the in-process
     #: HF/custom target backends were removed with the server-only cutover, so
     #: configs naming them fail at load instead of being silently ignored.

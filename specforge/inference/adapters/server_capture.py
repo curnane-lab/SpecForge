@@ -183,7 +183,9 @@ class SGLangServerCaptureAdapter:
     ``abort()``/``gc()`` on the producer side can free server-written objects).
     ``post_fn`` is injectable for tests; the default reuses one HTTP
     connection per calling thread. ``server_info_fn(url, timeout)`` fetches
-    ``/server_info`` when ``server_capture="auto"``.
+    ``/server_info`` when ``server_capture="auto"``. Before the first capture,
+    ``model_info_fn`` reads ``/model_info`` so the expected model path and
+    checkpoint weight version can be verified and recorded on every ref.
     """
 
     def __init__(
@@ -197,9 +199,11 @@ class SGLangServerCaptureAdapter:
         request_input_adapter=None,
         timeout_s: float = 300.0,
         post_fn: Optional[Callable[..., Any]] = None,
-        target_model_version: str = "unknown",
+        target_model_version: Optional[str] = "unknown",
+        expected_model_path: Optional[str] = None,
         server_capture: str = "plugin",
         server_info_fn: Optional[Callable[[str, float], Mapping[str, Any]]] = None,
+        model_info_fn: Optional[Callable[[str, float], Mapping[str, Any]]] = None,
     ) -> None:
         if server_capture not in ("auto", *SERVER_CAPTURE_BACKENDS):
             raise ValueError(
@@ -239,10 +243,15 @@ class SGLangServerCaptureAdapter:
         self.timeout_s = timeout_s
         self.post_fn = post_fn or _SessionPost()
         self.target_model_version = target_model_version
+        self.expected_model_path = expected_model_path
         #: ``auto`` until the first request reads the server's backend.
         self.server_capture = server_capture
         self.server_info_fn = server_info_fn or _get_server_info
+        self.model_info_fn = model_info_fn or _get_server_info
         self._server_capture_lock = threading.Lock()
+        self._teacher_identity_lock = threading.Lock()
+        self._teacher_model_path: Optional[str] = None
+        self._teacher_weight_version: Optional[str] = None
         self._healthy = True
 
     def _resolve_server_capture(self) -> str:
@@ -268,6 +277,66 @@ class SGLangServerCaptureAdapter:
                     self.server_capture,
                 )
             return self.server_capture
+
+    def _resolve_teacher_identity(self) -> None:
+        with self._teacher_identity_lock:
+            if self._teacher_weight_version is not None:
+                return
+            expected_version = self.target_model_version
+            if not isinstance(expected_version, str) or not expected_version.strip():
+                expected_version = None
+            if expected_version in (None, "unknown"):
+                raise ValueError(
+                    "server capture requires an expected teacher weight version; "
+                    "set model.target_weight_version or --target-weight-version"
+                )
+            try:
+                info = self.model_info_fn(
+                    f"{self.base_url}/model_info", _SERVER_INFO_TIMEOUT_S
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"cannot read {self.base_url}/model_info to verify teacher "
+                    f"weights: {exc}"
+                ) from exc
+            if not isinstance(info, Mapping):
+                raise RuntimeError(
+                    f"{self.base_url}/model_info returned non-object model info"
+                )
+            model_path = info.get("model_path")
+            weight_version = info.get("weight_version")
+            if not isinstance(model_path, str) or not model_path:
+                raise RuntimeError(
+                    f"{self.base_url}/model_info reports model_path={model_path!r}; "
+                    "a non-empty model path is required before capture"
+                )
+            if not isinstance(weight_version, str) or not weight_version.strip():
+                raise RuntimeError(
+                    f"{self.base_url}/model_info reports "
+                    f"weight_version={weight_version!r}; a non-empty checkpoint "
+                    "version is required before capture"
+                )
+            if (
+                self.expected_model_path is not None
+                and model_path != self.expected_model_path
+            ):
+                raise RuntimeError(
+                    f"{self.base_url}: teacher model_path={model_path!r}, "
+                    f"expected {self.expected_model_path!r}; refusing capture"
+                )
+            if weight_version != expected_version:
+                raise RuntimeError(
+                    f"{self.base_url}: teacher weight_version={weight_version!r}, "
+                    f"expected {expected_version!r}; refusing capture"
+                )
+            self._teacher_model_path = model_path
+            self._teacher_weight_version = weight_version
+            logger.info(
+                "%s verified teacher model_path=%s weight_version=%s",
+                self.base_url,
+                model_path,
+                weight_version,
+            )
 
     # -- request construction -------------------------------------------------
     def _sample_id(self, task: PromptTask) -> str:
@@ -386,7 +455,7 @@ class SGLangServerCaptureAdapter:
             feature_specs=specs,
             strategy=self.strategy,
             schema_version=SCHEMA_VERSION,
-            target_model_version=self.target_model_version,
+            target_model_version=self._teacher_weight_version,
             tokenizer_version=str(task.metadata.get("tokenizer_version", "unknown")),
             num_tokens=num_tokens,
             estimated_bytes=nbytes,
@@ -394,6 +463,8 @@ class SGLangServerCaptureAdapter:
                 "run_id": self.run_id,
                 "source_task_id": task.task_id,
                 "strategy": self.strategy,
+                "target_model_path": self._teacher_model_path,
+                "target_weight_version": self._teacher_weight_version,
                 "target_repr": capture.target_repr,
                 "vocab_map_version": capture.vocab_map_version,
                 "transport": "sglang_server_capture",
@@ -434,6 +505,7 @@ class SGLangServerCaptureAdapter:
         retryable, mirroring ``generate_features`` semantics.
         """
         server_capture = self._resolve_server_capture()
+        self._resolve_teacher_identity()
         body = self._request_inputs(tasks)
         # A fresh cache namespace forces a full prefill on every attempt while
         # leaving SGLang free to use the radix data structure required by hybrid

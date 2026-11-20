@@ -57,6 +57,20 @@ both sides, and reinstall the plugin on existing servers to advertise these
 fields. TP size, device selection, attention backend, context length and radix
 cache options belong to the server command.
 
+Assign each loaded checkpoint a unique SGLang weight version before capturing.
+For example, after the server becomes healthy:
+
+```bash
+curl -X POST http://127.0.0.1:30000/update_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{"new_version":"qwen3-8b-revision-a"}'
+```
+
+Use a new version whenever the weights change, including rolling upgrades.
+The adapter reads `/model_info` before its first capture and rejects a missing
+or different `model_path`/`weight_version` before any feature write. Successful
+refs record the actual server-reported path and version.
+
 ## Capture and resume
 
 From the SpecForge environment:
@@ -65,6 +79,7 @@ From the SpecForge environment:
 python scripts/prepare_hidden_states.py \
   --server-urls http://127.0.0.1:30000 \
   --target-model-path Qwen/Qwen3-8B \
+  --target-weight-version qwen3-8b-revision-a \
   --draft specforge/config/draft/presets/qwen3-8b-dflash.yaml \
   --data-path ./cache/dataset/sharegpt_train.jsonl \
   --output-path ./cache/hidden_states/qwen3-8b-dflash-sharegpt \

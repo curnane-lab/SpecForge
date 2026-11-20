@@ -31,6 +31,7 @@ from specforge.inference.adapters.server_capture import (
     ServerCaptureFailure,
     ServerCaptureSchema,
     SGLangServerCaptureAdapter,
+    _get_server_info,
     detect_server_capture,
 )
 from specforge.inference.capture import (
@@ -300,8 +301,11 @@ def _mk(
     backend=None,
     request_input_adapter=None,
     teacher_metrics=True,
+    target_model_version="revision-a",
+    expected_model_path="teacher-a",
     server_capture="plugin",
     server_info_fn=None,
+    model_info_fn=None,
 ):
     backend = backend or _FakeMooncakeStore()
     if server is None:
@@ -315,8 +319,17 @@ def _mk(
         schema=_capture_schema(algorithm, teacher_metrics=teacher_metrics),
         request_input_adapter=request_input_adapter,
         post_fn=server,
+        target_model_version=target_model_version,
+        expected_model_path=expected_model_path,
         server_capture=server_capture,
         server_info_fn=server_info_fn,
+        model_info_fn=model_info_fn
+        or (
+            lambda *_: {
+                "model_path": expected_model_path,
+                "weight_version": target_model_version,
+            }
+        ),
     )
     return backend, server, store, adapter
 
@@ -466,6 +479,60 @@ class TestServerCaptureAdapter(unittest.TestCase):
             store.release(handle)
         # consume-once: released samples are physically freed
         self.assertFalse(any(backend._d))
+
+    def test_teacher_identity_is_checked_once_and_recorded(self):
+        fetched = []
+
+        def model_info(url, timeout):
+            del timeout
+            fetched.append(url)
+            return {"model_path": "teacher-a", "weight_version": "revision-a"}
+
+        _, _, _, adapter = _mk(model_info_fn=model_info)
+        for index in range(2):
+            (ref,) = adapter.produce_refs([_task(index, 4)], capture=_eagle3_contract())
+            self.assertEqual(ref.target_model_version, "revision-a")
+            self.assertEqual(ref.metadata["target_model_path"], "teacher-a")
+            self.assertEqual(ref.metadata["target_weight_version"], "revision-a")
+        self.assertEqual(fetched, ["http://server:30000/model_info"])
+
+    def test_default_model_info_fetch(self):
+        response = mock.Mock()
+        response.json.return_value = {
+            "model_path": "teacher-a",
+            "weight_version": "revision-a",
+        }
+        _, _, _, adapter = _mk()
+        adapter.model_info_fn = _get_server_info
+        with mock.patch("requests.get", return_value=response) as get:
+            (ref,) = adapter.produce_refs([_task(0, 4)], capture=_eagle3_contract())
+        self.assertEqual(ref.target_model_version, "revision-a")
+        get.assert_called_once_with("http://server:30000/model_info", timeout=30.0)
+        response.raise_for_status.assert_called_once_with()
+
+    def test_teacher_identity_mismatch_fails_before_capture(self):
+        for field, value, message in (
+            ("model_path", "teacher-b", "model_path.*teacher-b"),
+            ("weight_version", "revision-b", "weight_version.*revision-b"),
+            ("weight_version", None, "non-empty checkpoint version"),
+        ):
+            with self.subTest(field=field, value=value):
+                info = {"model_path": "teacher-a", "weight_version": "revision-a"}
+                info[field] = value
+                backend, server, store, adapter = _mk(model_info_fn=lambda *_: info)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    adapter.produce_refs([_task(0, 4)], capture=_eagle3_contract())
+                self.assertFalse(server.expected)
+                self.assertFalse(backend._d)
+                self.assertEqual(store.health()["provisional_external"], 0)
+
+    def test_teacher_weight_version_must_be_configured(self):
+        model_info = mock.Mock()
+        _, server, _, adapter = _mk(target_model_version=None, model_info_fn=model_info)
+        with self.assertRaisesRegex(ValueError, "target_weight_version"):
+            adapter.produce_refs([_task(0, 4)], capture=_eagle3_contract())
+        model_info.assert_not_called()
+        self.assertFalse(server.expected)
 
     def test_dflash_schema_includes_teacher_hidden_for_metrics(self):
         backend, server, store, adapter = _mk(algorithm="dflash")
@@ -1068,6 +1135,13 @@ class TestDefaultHttpTransport(unittest.TestCase):
             run_id="run0",
             algorithm="eagle3",
             schema=_capture_schema("eagle3"),
+            target_model_version="revision-a",
+            model_info_fn=mock.Mock(
+                return_value={
+                    "model_path": "teacher-a",
+                    "weight_version": "revision-a",
+                }
+            ),
         )
         return httpd, adapter
 
@@ -1107,6 +1181,9 @@ class TestDefaultHttpTransport(unittest.TestCase):
         )
         distinct = set().union(*ports_by_caller.values())
         self.assertEqual(len(distinct), 3)
+        adapter.model_info_fn.assert_called_once_with(
+            f"http://127.0.0.1:{httpd.server_address[1]}/model_info", 30.0
+        )
 
     def test_http_errors_still_fail_the_lease_batch(self):
         import requests
@@ -1193,6 +1270,11 @@ class TestServerCaptureProducerWiring(unittest.TestCase):
             algorithm="dflash",
             schema=_capture_schema("dflash"),
             post_fn=server,
+            target_model_version="revision-a",
+            model_info_fn=lambda *_: {
+                "model_path": "teacher-a",
+                "weight_version": "revision-a",
+            },
         )
         prompts = [
             {

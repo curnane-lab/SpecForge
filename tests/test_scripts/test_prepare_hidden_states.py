@@ -27,6 +27,8 @@ class PrepareHiddenStatesCaptureLayersTest(unittest.TestCase):
             "http://localhost:30000",
             "--target-model-path",
             "target",
+            "--target-weight-version",
+            "revision-a",
             "--data-path",
             "data.jsonl",
         ]
@@ -80,6 +82,7 @@ class PrepareHiddenStatesCaptureLayersTest(unittest.TestCase):
                 objective=None,
                 objective_options={},
                 target_model_path="target",
+                target_weight_version="revision-a",
                 draft=str(REPO_ROOT / "specforge/config/draft/presets" / config_name),
                 trust_remote_code=False,
                 cache_dir=None,
@@ -268,7 +271,10 @@ class CanonicalCaptureTest(unittest.TestCase):
             run.write_text(
                 yaml.safe_dump(
                     {
-                        "model": {"target_model_path": str(target)},
+                        "model": {
+                            "target_model_path": str(target),
+                            "target_weight_version": "revision-a",
+                        },
                         "draft": str(draft),
                         "data": {"hidden_states_path": str(root / "features")},
                         "training": {
@@ -286,7 +292,14 @@ class CanonicalCaptureTest(unittest.TestCase):
                 "data.jsonl",
             ]
             selections = {
-                "draft": ["--draft", str(draft), "--target-model-path", str(target)],
+                "draft": [
+                    "--draft",
+                    str(draft),
+                    "--target-model-path",
+                    str(target),
+                    "--target-weight-version",
+                    "revision-a",
+                ],
                 "config": ["-c", str(run)],
             }
             plans = {}
@@ -311,7 +324,10 @@ class CanonicalCaptureTest(unittest.TestCase):
             legacy.write_text(
                 yaml.safe_dump(
                     {
-                        "model": {"target_model_path": str(target)},
+                        "model": {
+                            "target_model_path": str(target),
+                            "target_weight_version": "revision-a",
+                        },
                         "data": {"hidden_states_path": str(root / "features")},
                     }
                 )
@@ -345,6 +361,8 @@ class CanonicalCaptureTest(unittest.TestCase):
                     str(path),
                     "--target-model-path",
                     str(target),
+                    "--target-weight-version",
+                    "revision-a",
                     "--server-urls",
                     "http://localhost:30000",
                     "--data-path",

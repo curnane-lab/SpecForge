@@ -698,7 +698,8 @@ def _build_online(
                 algorithm=algorithm.name,
                 schema=capture_schema,
                 request_input_adapter=input_adapter,
-                target_model_version=cfg.model.target_model_path,
+                target_model_version=cfg.model.target_weight_version,
+                expected_model_path=cfg.model.target_model_path,
                 server_capture=_server_capture(cfg),
             )
             for url in _server_urls(cfg)

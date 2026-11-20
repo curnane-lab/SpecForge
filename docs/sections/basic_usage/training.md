@@ -334,12 +334,16 @@ contract, including optional `output_multiplier` and
 
 The checked-in Qwen3.6-27B recipe owns a two-GPU local stack: one configured
 GPU runs the target capture server and another runs the trainer. Update its
-model/data paths and `cuda_visible_devices` lists for the local host.
+model/data paths and `cuda_visible_devices` lists for the local host. Set
+`model.target_weight_version` to the checkpoint's unique revision and configure
+SGLang to report the same `weight_version` from `/model_info`; capture stops
+before writing features when any server has a different path or version.
 
 ```bash
 specforge train \
   -c examples/configs/online/disaggregated/managed-local/qwen3.6-27b-dflash2.yaml \
-  model.target_model_path=/path/to/Qwen3.6-27B
+  model.target_model_path=/path/to/Qwen3.6-27B \
+  model.target_weight_version=qwen3.6-27b-revision-a
 ```
 
 Export for serving with `specforge export --converter sglang`. Serving requires an SGLang

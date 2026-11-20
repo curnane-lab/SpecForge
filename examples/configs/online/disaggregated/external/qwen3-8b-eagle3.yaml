@@ -1,5 +1,7 @@
 model:
   target_model_path: Qwen/Qwen3-8B
+  # Replace with the unique checkpoint revision reported by /model_info.
+  target_weight_version: qwen3-8b-revision-a
   target_backend: sglang
   vocab_mapping_path: cache/vocab_mapping/qwen3-8b.pt
   embedding_key: model.embed_tokens.weight

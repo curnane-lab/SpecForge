@@ -59,6 +59,7 @@ class OfflineCaptureTest(unittest.TestCase):
         )
         info = {
             "model_path": "target",
+            "weight_version": "revision-a",
             "internal_states": [
                 {
                     "spec_capture_backend": "plugin",
@@ -69,11 +70,13 @@ class OfflineCaptureTest(unittest.TestCase):
         }
         kwargs = dict(
             target_model_path="target",
+            target_weight_version="revision-a",
             capture_layers=[1, 3],
             layout=self.layout,
             target_hidden_size=4,
             store=self.store,
             server_info_fn=lambda *_: info,
+            model_info_fn=lambda *_: info,
             post_fn=self.post,
         )
         kwargs.update(overrides)

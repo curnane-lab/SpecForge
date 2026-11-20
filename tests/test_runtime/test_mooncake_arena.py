@@ -139,6 +139,11 @@ class ArenaObjectClientTest(unittest.TestCase):
             algorithm="eagle3",
             schema=_capture_schema("eagle3"),
             post_fn=self.server,
+            target_model_version="revision-a",
+            model_info_fn=lambda *_: {
+                "model_path": "teacher-a",
+                "weight_version": "revision-a",
+            },
         )
 
     @staticmethod
@@ -247,6 +252,11 @@ class ArenaObjectClientTest(unittest.TestCase):
             algorithm="eagle3",
             schema=self.adapter.schema,
             post_fn=_ArenaCaptureServer(other),
+            target_model_version="revision-a",
+            model_info_fn=lambda *_: {
+                "model_path": "teacher-a",
+                "weight_version": "revision-a",
+            },
         )
         (ref,) = adapter_b.produce_refs(
             [replace(task, attempt=1)], capture=_eagle3_contract()

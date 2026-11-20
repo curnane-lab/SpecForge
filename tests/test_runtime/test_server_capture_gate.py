@@ -43,6 +43,7 @@ from tests.utils import terminate_process_trees
 CUDA = torch.cuda.is_available()
 ENABLED = os.environ.get("SPECFORGE_RUN_SERVER_CAPTURE_TESTS") == "1"
 PORT = int(os.environ.get("SPECFORGE_CAPTURE_GATE_PORT", "30989"))
+WEIGHT_VERSION = "gate-v1"
 AUX_LAYER_IDS = [1, 3, 4]
 H, TOL = 64, 2e-2  # fixture hidden size; documented bf16 tolerance
 
@@ -229,6 +230,12 @@ class TestServerCaptureGate(unittest.TestCase):
         while time.time() < deadline:
             try:
                 if requests.get(f"http://localhost:{PORT}/health", timeout=5).ok:
+                    response = requests.post(
+                        f"http://localhost:{PORT}/update_weight_version",
+                        json={"new_version": WEIGHT_VERSION},
+                        timeout=5,
+                    )
+                    response.raise_for_status()
                     return
             except requests.RequestException:
                 pass
@@ -365,6 +372,7 @@ class TestServerCaptureGate(unittest.TestCase):
                 OfflineCaptureClient(
                     [f"http://localhost:{PORT}"],
                     target_model_path=self.target_dir,
+                    target_weight_version=WEIGHT_VERSION,
                     capture_layers=AUX_LAYER_IDS,
                     layout=layout,
                     target_hidden_size=H,
@@ -405,6 +413,8 @@ class TestServerCaptureGate(unittest.TestCase):
             algorithm="eagle3",
             schema=_capture_schema("eagle3"),
             server_capture=SERVER_CAPTURE,
+            target_model_version=WEIGHT_VERSION,
+            expected_model_path=self.target_dir,
         )
         contract = CaptureConfig.from_strategy(
             required_features={
@@ -516,6 +526,8 @@ class TestServerCaptureGate(unittest.TestCase):
             algorithm="dflash",
             schema=_capture_schema("dflash"),
             server_capture=SERVER_CAPTURE,
+            target_model_version=WEIGHT_VERSION,
+            expected_model_path=self.target_dir,
         )
         contract = CaptureConfig.from_strategy(
             required_features={"input_ids", "hidden_states", "loss_mask"},
@@ -559,6 +571,8 @@ class TestServerCaptureGate(unittest.TestCase):
             algorithm="dflash",
             schema=_capture_schema("dflash", teacher_metrics=False),
             server_capture=SERVER_CAPTURE,
+            target_model_version=WEIGHT_VERSION,
+            expected_model_path=self.target_dir,
         )
         contract = CaptureConfig.from_strategy(
             required_features={"input_ids", "hidden_states", "loss_mask"},

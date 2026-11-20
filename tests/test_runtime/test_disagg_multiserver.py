@@ -81,6 +81,11 @@ def _adapter(store, post_fn, url="http://server:30000"):
             attention_mask_feature=layout.attention_mask_feature,
         ),
         post_fn=post_fn,
+        target_model_version="revision-a",
+        model_info_fn=lambda *_: {
+            "model_path": "teacher-a",
+            "weight_version": "revision-a",
+        },
     )
 
 

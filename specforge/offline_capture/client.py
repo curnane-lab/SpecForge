@@ -36,9 +36,11 @@ class OfflineCaptureClient:
         capture_layers,
         layout,
         target_hidden_size,
+        target_weight_version=None,
         timeout_s=300.0,
         store=None,
         server_info_fn=None,
+        model_info_fn=None,
         post_fn=None,
     ):
         self.urls = tuple(url.rstrip("/") for url in server_urls)
@@ -89,8 +91,10 @@ class OfflineCaptureClient:
                 algorithm=layout.capture_method,
                 schema=ServerCaptureSchema(aux, last, ()),
                 timeout_s=timeout_s,
-                target_model_version=target_model_path,
+                target_model_version=target_weight_version,
+                expected_model_path=target_model_path,
                 server_capture="plugin",
+                model_info_fn=model_info_fn,
                 post_fn=post_fn,
             )
             for url in self.urls

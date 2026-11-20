@@ -141,7 +141,10 @@ class TestTrainingRunLifecycle(unittest.TestCase):
                 root = tempfile.mkdtemp(prefix="producer_layout_")
                 cfg = Config.model_validate(
                     {
-                        "model": {"target_model_path": "t"},
+                        "model": {
+                            "target_model_path": "t",
+                            "target_weight_version": "revision-a",
+                        },
                         "draft": encode_config(draft_config()),
                         "data": {"prompts_path": "prompts.jsonl"},
                         "training": {
@@ -201,6 +204,12 @@ class TestTrainingRunLifecycle(unittest.TestCase):
                 schema = adapter_cls.call_args.kwargs["schema"]
                 self.assertEqual("hidden_states", schema.aux_feature)
                 self.assertEqual(last_hidden, schema.last_hidden_feature)
+                self.assertEqual(
+                    adapter_cls.call_args.kwargs["target_model_version"], "revision-a"
+                )
+                self.assertEqual(
+                    adapter_cls.call_args.kwargs["expected_model_path"], "t"
+                )
 
     def test_training_run_delegates_to_the_one_trainer_entry(self):
         trainer = _FakeTrainer(fit_step=3)

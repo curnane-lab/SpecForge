@@ -1,5 +1,7 @@
 model:
   target_model_path: /disk3/wjp/pretrained_models/Qwen3.6-27B
+  # Replace with the unique checkpoint revision reported by /model_info.
+  target_weight_version: qwen3.6-27b-revision-a
   target_backend: sglang
   trust_remote_code: true
   embedding_key: model.language_model.embed_tokens.weight

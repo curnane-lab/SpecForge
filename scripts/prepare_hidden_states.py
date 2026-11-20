@@ -5,6 +5,7 @@ Start the capture service separately (see examples/offline/README.md), then:
     python scripts/prepare_hidden_states.py \
         --server-urls http://127.0.0.1:30000 \
         --target-model-path Qwen/Qwen3-8B \
+        --target-weight-version qwen3-8b-revision-a \
         --data-path ./cache/dataset/sharegpt_train.jsonl \
         --output-path ./cache/hidden_states/sharegpt_qwen3-8b \
         --chat-template qwen --draft specforge/config/draft/presets/qwen3-8b-eagle3.yaml
@@ -68,6 +69,15 @@ def parse_args():
         type=str,
         default=None,
         help="Target model; defaults to model.target_model_path of --config",
+    )
+    model_group.add_argument(
+        "--target-weight-version",
+        type=str,
+        default=None,
+        help=(
+            "Expected SGLang checkpoint weight version; defaults to "
+            "model.target_weight_version of --config"
+        ),
     )
     draft_group = model_group.add_mutually_exclusive_group(required=True)
     draft_group.add_argument(
@@ -153,15 +163,26 @@ def parse_args():
     if args.config:
         from specforge.config.schema import load_config
 
-        run_target = load_config(args.config).model.target_model_path
+        run_model = load_config(args.config).model
+        run_target = run_model.target_model_path
+        run_weight_version = run_model.target_weight_version
         if args.target_model_path not in (None, run_target):
             parser.error(
                 f"--target-model-path {args.target_model_path!r} differs from "
                 f"model.target_model_path {run_target!r} in {args.config}"
             )
+        if args.target_weight_version not in (None, run_weight_version):
+            parser.error(
+                f"--target-weight-version {args.target_weight_version!r} differs "
+                f"from model.target_weight_version {run_weight_version!r} in "
+                f"{args.config}"
+            )
         args.target_model_path = run_target
+        args.target_weight_version = run_weight_version
     elif args.target_model_path is None:
         parser.error("--target-model-path is required without --config")
+    if args.target_weight_version is None:
+        parser.error("--target-weight-version is required without a configured value")
     return args
 
 
@@ -281,6 +302,7 @@ def resolve_offline_capture_plan(
         )
     model = {
         "target_model_path": args.target_model_path,
+        "target_weight_version": args.target_weight_version,
         "trust_remote_code": args.trust_remote_code,
         "cache_dir": getattr(args, "cache_dir", None),
     }
@@ -314,6 +336,7 @@ def build_capture_client(args, model_config, plan):
     return OfflineCaptureClient(
         args.server_urls,
         target_model_path=args.target_model_path,
+        target_weight_version=args.target_weight_version,
         capture_layers=plan.capture_layers,
         layout=plan.layout,
         target_hidden_size=hidden_size,

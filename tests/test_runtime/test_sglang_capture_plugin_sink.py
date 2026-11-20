@@ -387,6 +387,11 @@ class SpecCaptureSinkTest(unittest.TestCase):
             schema=_capture_schema("eagle3"),
             post_fn=post,
             server_capture="plugin",
+            target_model_version="revision-a",
+            model_info_fn=lambda *_: {
+                "model_path": "teacher-a",
+                "weight_version": "revision-a",
+            },
         )
 
         def read(session, ptr, address, nbytes):
