@@ -93,6 +93,7 @@ class ServerCaptureSchema:
     last_hidden_feature: Optional[str]
     passthrough: Tuple[Tuple[str, str, Tuple[int, ...]], ...]
     attention_mask_feature: Optional[str] = None
+    mtp_hidden_feature: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +305,8 @@ class SGLangServerCaptureAdapter:
             features["aux"] = self.schema.aux_feature
         if self.schema.last_hidden_feature is not None:
             features["last_hidden"] = self.schema.last_hidden_feature
+        if self.schema.mtp_hidden_feature is not None:
+            features["mtp_hidden"] = self.schema.mtp_hidden_feature
         passthrough: List[Dict[str, Any]] = []
         for feature_name, payload_key, trailing in self.schema.passthrough:
             if payload_key == "input_ids":
@@ -408,6 +411,8 @@ class SGLangServerCaptureAdapter:
                 ),
             },
         )
+        if self.schema.mtp_hidden_feature is not None:
+            ref.metadata["mtp_hidden_alignment"] = result.get("mtp_hidden_alignment")
         if "arena" in result:
             # Arena objects stay on the capture server; currently only online
             # NVLink capture uses the arena.
@@ -552,6 +557,30 @@ class SGLangServerCaptureAdapter:
                 )
                 continue
             try:
+                if self.schema.mtp_hidden_feature is not None:
+                    if result.get("mtp_hidden_alignment") != "anchor_post_norm_v1":
+                        raise CaptureMismatchError(
+                            f"[{ref.sample_id}] capture returned no supported "
+                            "mtp_hidden_states alignment"
+                        )
+                    mtp_spec = ref.feature_specs.get(self.schema.mtp_hidden_feature)
+                    mtp_hidden_size = (
+                        capture.mtp_hidden_size or capture.target_hidden_size
+                    )
+                    if (
+                        mtp_spec is None
+                        or len(mtp_spec.shape) != 3
+                        or mtp_spec.shape[0] != 1
+                        or mtp_spec.shape[-1] != mtp_hidden_size
+                    ):
+                        raise CaptureMismatchError(
+                            f"[{ref.sample_id}] mtp_hidden_states must have shape "
+                            "[1, sequence, mtp_hidden_size]"
+                        )
+                    if mtp_spec.dtype not in ("float16", "bfloat16", "float32"):
+                        raise CaptureMismatchError(
+                            f"[{ref.sample_id}] mtp_hidden_states must be floating-point"
+                        )
                 recorded_aux_layer_ids = result.get("aux_layer_ids")
                 if (
                     capture.aux_hidden_state_layer_ids

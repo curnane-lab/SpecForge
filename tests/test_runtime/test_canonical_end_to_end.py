@@ -281,6 +281,101 @@ class CanonicalLifecycleTest(unittest.TestCase):
                 model = load_draft(final, target=root / "target")
                 assert_same_state(self, model.state_dict(), trained)
 
+    def test_dmtp_captured_features_train_and_resume(self):
+        from dataclasses import replace
+
+        from specforge.inference.adapters.server_capture import (
+            SGLangServerCaptureAdapter,
+        )
+        from specforge.inference.capture import CaptureConfig
+        from specforge.runtime.data_plane.mooncake_store import MooncakeFeatureStore
+        from tests.test_runtime.test_server_capture import (
+            _capture_schema,
+            _FakeMooncakeStore,
+            _StubCaptureServer,
+            _task,
+        )
+
+        draft = dmtp_config(bound=True)
+        original_spec = draft.spec_config
+        draft = replace(
+            draft,
+            spec_config=replace(
+                original_spec,
+                mtp_features=replace(
+                    original_spec.mtp_features,
+                    hidden_size=original_spec.target_features.hidden_size,
+                ),
+            ),
+        )
+        spec = draft.spec_config
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = write_run(root, draft)
+            backend = _FakeMooncakeStore()
+            server = _StubCaptureServer(
+                backend,
+                hidden=spec.target_features.hidden_size,
+                aux_width=spec.target_features.input_width(),
+                aux_layer_ids=spec.target_features.target_layer_ids,
+            )
+            store = MooncakeFeatureStore(store=backend, store_id="run0")
+            adapter = SGLangServerCaptureAdapter(
+                "http://server:30000",
+                store,
+                run_id="run0",
+                algorithm="dflash",
+                schema=_capture_schema("dmtp"),
+                post_fn=server,
+            )
+            contract = CaptureConfig.from_strategy(
+                required_features={
+                    "input_ids",
+                    "loss_mask",
+                    "hidden_states",
+                    "mtp_hidden_states",
+                },
+                aux_hidden_state_layer_ids=spec.target_features.target_layer_ids,
+                target_repr=None,
+                target_hidden_size=spec.target_features.hidden_size,
+                mtp_hidden_size=spec.mtp_features.hidden_size,
+            )
+            refs = adapter.produce_refs(
+                [_task(index, 8 + index) for index in range(3)], capture=contract
+            )
+            for index, ref in enumerate(refs):
+                tensors, handle = store.get(ref)
+                record = {
+                    name: value[0].detach().cpu() for name, value in tensors.items()
+                }
+                torch.save(record, root / "features" / f"{index}.ckpt")
+                store.release(handle)
+
+            schedule = ("training.max_steps=2", "training.total_steps=2")
+            self.assertEqual(train(config, *schedule), 2)
+            output = f"output_dir={root / 'interrupted'}"
+            self.assertEqual(
+                train(config, output, "training.max_steps=1", "training.total_steps=2"),
+                1,
+            )
+            cut = checkpoint_dir(root / "interrupted", 1)
+            self.assertEqual(
+                train(
+                    config,
+                    output,
+                    f"resume={cut}",
+                    "initialization=null",
+                    *schedule,
+                ),
+                2,
+            )
+            assert_same_state(
+                self,
+                training_state(checkpoint_dir(root / "interrupted", 2)),
+                training_state(checkpoint_dir(root / "reference", 2)),
+                atol=recomputed_tolerance(),
+            )
+
     def test_resumed_run_matches_the_uninterrupted_run(self):
         for draft in drafts():
             with (

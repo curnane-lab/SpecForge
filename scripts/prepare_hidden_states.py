@@ -317,6 +317,11 @@ def build_capture_client(args, model_config, plan):
         capture_layers=plan.capture_layers,
         layout=plan.layout,
         target_hidden_size=hidden_size,
+        mtp_hidden_size=getattr(
+            getattr(plan.draft_config.spec_config, "mtp_features", None),
+            "hidden_size",
+            None,
+        ),
         timeout_s=args.capture_timeout,
     )
 

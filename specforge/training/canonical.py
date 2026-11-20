@@ -201,8 +201,8 @@ def resolve_run(cfg, *, target_config=None):
             storage=storage,
         )
     ]
-    # Generic capture supplies aux/final target states. DMTP needs an external
-    # frozen-MTP feature producer, so only precomputed records are accepted.
+    # Generic capture supplies aux/final target states and, for DMTP, the
+    # aligned frozen-MTP predictor state from the capture plugin.
     layout = (
         None
         if requirements.capture_method is None
@@ -211,6 +211,9 @@ def resolve_run(cfg, *, target_config=None):
             aux_feature="hidden_states" if "hidden_states" in keys else None,
             last_hidden_feature="target_last_hidden_states" if target_repr else None,
             passthrough=(("input_ids", "input_ids"), ("loss_mask", "loss_mask")),
+            mtp_hidden_feature=(
+                "mtp_hidden_states" if "mtp_hidden_states" in keys else None
+            ),
         )
     )
     offline = OfflineDataProvider(
@@ -235,6 +238,7 @@ def resolve_run(cfg, *, target_config=None):
                 ("input_ids", "input_ids", ()),
                 ("loss_mask", "loss_mask", ()),
             ),
+            mtp_hidden_feature=layout.mtp_hidden_feature,
         )
         streaming = (
             ServerStreamingProvider(

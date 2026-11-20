@@ -158,6 +158,11 @@ class _StubCaptureServer:
                     mapping["last_hidden"],
                     torch.randn(1, length, self.hidden, dtype=torch.bfloat16),
                 )
+            if "mtp_hidden" in mapping:
+                _write(
+                    mapping["mtp_hidden"],
+                    torch.randn(1, length, self.hidden, dtype=torch.bfloat16),
+                )
             for item in spec.get("passthrough", []):
                 _write(
                     item["name"],
@@ -176,6 +181,11 @@ class _StubCaptureServer:
                                 "gen": gen,
                                 "aux_layer_ids": self.aux_layer_ids,
                                 "features": feats,
+                                **(
+                                    {"mtp_hidden_alignment": "anchor_post_norm_v1"}
+                                    if "mtp_hidden" in mapping
+                                    else {}
+                                ),
                             }
                         )
                     }
@@ -262,9 +272,43 @@ def _dspark_contract() -> CaptureConfig:
     )
 
 
+def _dmtp_contract() -> CaptureConfig:
+    return CaptureConfig.from_strategy(
+        required_features={
+            "input_ids",
+            "hidden_states",
+            "loss_mask",
+            "mtp_hidden_states",
+        },
+        aux_hidden_state_layer_ids=AUX_LAYERS,
+        target_repr=None,
+        target_hidden_size=HIDDEN,
+    )
+
+
+def _dmtp_registration():
+    from specforge.config import Config
+    from specforge.config.draft.codec import encode_config
+    from specforge.training.canonical import resolve_run
+    from tests.test_modeling.test_canonical_dmtp import model_config
+
+    cfg = Config.model_validate(
+        {
+            "draft": encode_config(model_config(bound=True)),
+            "model": {"target_model_path": "target"},
+            "data": {"hidden_states_path": "features"},
+        }
+    )
+    return resolve_run(cfg)[1]
+
+
 def _capture_schema(algorithm: str, *, teacher_metrics: bool = True):
-    registration = builtin_algorithm_registry(teacher_metrics=teacher_metrics).resolve(
-        algorithm
+    registration = (
+        _dmtp_registration()
+        if algorithm == "dmtp"
+        else builtin_algorithm_registry(teacher_metrics=teacher_metrics).resolve(
+            algorithm
+        )
     )
     config = SimpleNamespace(
         training=SimpleNamespace(objective_options={"teacher_metrics": teacher_metrics})
@@ -275,6 +319,7 @@ def _capture_schema(algorithm: str, *, teacher_metrics: bool = True):
         last_hidden_feature=layout.last_hidden_feature,
         passthrough=layout.passthrough,
         attention_mask_feature=layout.attention_mask_feature,
+        mtp_hidden_feature=layout.mtp_hidden_feature,
     )
 
 
@@ -311,7 +356,7 @@ def _mk(
         "http://server:30000",
         store,
         run_id="run0",
-        algorithm=algorithm,
+        algorithm="dflash" if algorithm == "dmtp" else algorithm,
         schema=_capture_schema(algorithm, teacher_metrics=teacher_metrics),
         request_input_adapter=request_input_adapter,
         post_fn=server,
@@ -576,6 +621,55 @@ class TestServerCaptureAdapter(unittest.TestCase):
         )
         out, _ = store.get(ref)
         self.assertIn("target_last_hidden_states", out)
+
+    def test_dmtp_schema_transports_aligned_mtp_hidden_states(self):
+        backend, server, store, adapter = _mk(algorithm="dmtp")
+        refs = adapter.produce_refs(
+            [_task(0, 5), _task(1, 7)], capture=_dmtp_contract()
+        )
+        self.assertTrue(all(isinstance(ref, SampleRef) for ref in refs))
+        fetched = []
+        for ref in refs:
+            self.assertEqual(ref.strategy, "dflash")
+            self.assertEqual(
+                ref.metadata["mtp_hidden_alignment"], "anchor_post_norm_v1"
+            )
+            self.assertEqual(
+                sorted(ref.feature_specs),
+                ["hidden_states", "input_ids", "loss_mask", "mtp_hidden_states"],
+            )
+            out, handle = store.get(ref)
+            self.assertTrue(
+                torch.equal(
+                    out["mtp_hidden_states"],
+                    server.expected[ref.sample_id]["mtp_hidden_states"],
+                )
+            )
+            fetched.append({key: value.clone() for key, value in out.items()})
+            store.release(handle)
+        collate = (
+            _dmtp_registration().providers.server_streaming_for("text").build_collator()
+        )
+        batch = collate(fetched)
+        self.assertEqual(batch["mtp_hidden_states"].shape, (2, 7, HIDDEN))
+
+    def test_dmtp_rejects_wrong_alignment_and_frees_keys(self):
+        backend = _FakeMooncakeStore()
+        server = _StubCaptureServer(backend)
+
+        def wrong_alignment(url, json_body, timeout):
+            rows = server(url, json_body, timeout)
+            rows[0]["meta_info"]["spec_capture"][0]["mtp_hidden_alignment"] = "wrong_v2"
+            return rows
+
+        _, _, store, adapter = _mk(
+            algorithm="dmtp", server=wrong_alignment, backend=backend
+        )
+        (result,) = adapter.produce_refs([_task(0, 5)], capture=_dmtp_contract())
+        self.assertIsInstance(result, ServerCaptureFailure)
+        self.assertFalse(result.retryable)
+        self.assertIn("alignment", result.reason)
+        self.assertFalse(backend._d)
 
     def test_batch_response_wrappers_are_normalized_by_sample_id(self):
         backend = _FakeMooncakeStore()

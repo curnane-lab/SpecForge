@@ -689,6 +689,7 @@ def _build_online(
             last_hidden_feature=layout.last_hidden_feature,
             passthrough=layout.passthrough,
             attention_mask_feature=layout.attention_mask_feature,
+            mtp_hidden_feature=layout.mtp_hidden_feature,
         )
         adapters = [
             SGLangServerCaptureAdapter(
@@ -716,6 +717,11 @@ def _build_online(
             producer_concurrency=cfg.runtime.producer_concurrency,
             run_id=cfg.run_id,
             target_hidden_size=hidden_size,
+            mtp_hidden_size=getattr(
+                getattr(draft_config.spec_config, "mtp_features", None),
+                "hidden_size",
+                None,
+            ),
             target_vocab_size=target_vocab,
             draft_vocab_size=draft_vocab,
             target_repr=target_repr,

@@ -51,12 +51,16 @@ class OfflineCaptureTest(unittest.TestCase):
         self.lost_response = False
 
     def client(self, strategy="eagle3", **overrides):
-        self.layout = (
-            builtin_algorithm_registry()
-            .resolve(strategy)
-            .providers.offline_for("text")
-            .capture_layout
-        )
+        layout = overrides.pop("layout", None)
+        if layout is not None:
+            self.layout = layout
+        else:
+            self.layout = (
+                builtin_algorithm_registry()
+                .resolve(strategy)
+                .providers.offline_for("text")
+                .capture_layout
+            )
         info = {
             "model_path": "target",
             "internal_states": [
@@ -67,6 +71,10 @@ class OfflineCaptureTest(unittest.TestCase):
                 }
             ],
         }
+        if self.layout.mtp_hidden_feature is not None:
+            info["internal_states"][0][
+                "spec_capture_mtp_hidden_alignment"
+            ] = "anchor_post_norm_v1"
         kwargs = dict(
             target_model_path="target",
             capture_layers=[1, 3],
@@ -86,15 +94,14 @@ class OfflineCaptureTest(unittest.TestCase):
         self.calls.append(body)
         samples = []
         for ids, spec in zip(body["input_ids"], _request_specs(body)):
-            samples.append(
-                (
-                    spec,
-                    torch.arange(len(ids) * 8, dtype=torch.float32).reshape(
-                        len(ids), 8
-                    ),
-                    torch.ones(len(ids), 4),
-                )
+            sample = (
+                spec,
+                torch.arange(len(ids) * 8, dtype=torch.float32).reshape(len(ids), 8),
+                torch.ones(len(ids), 4),
             )
+            if "mtp_hidden" in spec["features"]:
+                sample += (torch.full((len(ids), 4), 2.0),)
+            samples.append(sample)
         results = self.sink.put_samples(samples)
         if self.lost_response:
             raise TimeoutError("response lost after publication")
@@ -140,6 +147,35 @@ class OfflineCaptureTest(unittest.TestCase):
                             record[self.layout.aux_feature].shape, (1, length, 8)
                         )
                     self.assertFalse(self.backend._d)
+
+    def test_dmtp_round_trip_includes_aligned_mtp_hidden_states(self):
+        from tests.test_runtime.test_server_capture import _dmtp_registration
+
+        layout = _dmtp_registration().providers.offline_for("text").capture_layout
+        client = self.client(layout=layout)
+        rows = [
+            {
+                "input_ids": [1, 2, 3],
+                "attention_mask": [1, 1, 1],
+                "loss_mask": [1, 1, 1],
+            },
+            {
+                "input_ids": [4, 5],
+                "attention_mask": [1, 1],
+                "loss_mask": [1, 1],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with HiddenStatesGenerator(client, layout) as generator:
+                generator.generate([rows], directory)
+            files = sorted(Path(directory).rglob("data_*"))
+            self.assertEqual(len(files), 2)
+            for path, length in zip(files, (3, 2)):
+                record = torch.load(path, weights_only=True)
+                self.assertEqual(set(record), set(layout.output_names))
+                self.assertEqual(record["mtp_hidden_states"].shape, (1, length, 4))
+                self.assertEqual(record["mtp_hidden_states"].sum().item(), length * 8)
+        self.assertFalse(self.backend._d)
 
     def test_features_live_until_writer_finishes(self):
         client = self.client()
